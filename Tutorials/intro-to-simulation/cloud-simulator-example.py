@@ -41,8 +41,8 @@ config = {
 # ======================================================================================================================
 
 # These should be changed to your credentials.
-email = "kharrison@northwestern.edu"
-password = "Qm47Hd92LfA03NcZtBv618Ry"
+email = add_username
+password = add_password
 
  
 
