@@ -41,8 +41,10 @@ config = {
 # ======================================================================================================================
 
 # These should be changed to your credentials.
-email = "john.doe@mail.com"
-password = "Password_given_by_QM"
+email = "kharrison@northwestern.edu"
+password = "Qm47Hd92LfA03NcZtBv618Ry"
+
+ 
 
 # Initialize QOP simulator client
 client = QmSaas(email=email, password=password)
