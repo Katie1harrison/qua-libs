@@ -41,9 +41,8 @@ config = {
 # ======================================================================================================================
 
 # These should be changed to your credentials.
-email = add_username
-password = add_password
-
+email = "kharrison@northwestern.edu"
+password = "Qm47Hd92LfA03NcZtBv618Ry"
  
 
 # Initialize QOP simulator client
