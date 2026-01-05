@@ -41,7 +41,7 @@ config = {
 # ======================================================================================================================
 
 # These should be changed to your credentials.
-email = "kharrison@northwestern.edu"
+email = "kharrison@u.northwestern.edu"
 password = "Qm47Hd92LfA03NcZtBv618Ry"
  
 
@@ -54,6 +54,7 @@ version = QoPVersion.v2_2_2
 
 with client.simulator(version=version) as instance:  # Specify the QOP version
     # Initialize QuantumMachinesManager with the simulation instance details
+    print(instance.default_connection_headers)
     qmm = QuantumMachinesManager(
         host=instance.host, port=instance.port, connection_headers=instance.default_connection_headers
     )

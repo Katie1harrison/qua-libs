@@ -1,9 +1,26 @@
 # %% {Imports}
+#this line allows importing from the project root directory. needed because this tutorial is in a subfolder and I need to access the "configuration folder".
+import os
+import sys
+# print(">>> top of time_of_flight.py reached")
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+print()
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "..", "..", ".."))
+# print(CURRENT_DIR)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+sys.path.append(os.path.join(CURRENT_DIR, ".."))
+
+# print(PROJECT_ROOT)
+
+
 import matplotlib.pyplot as plt
 
 from configuration.configuration_with_lf_fem_and_mw_fem import *
 
-from qm import QuantumMachinesManager
+from qm import QuantumMachinesManager, SimulationConfig
 from qm.qua import *
 
 from qualang_tools.results import fetching_tool
@@ -18,6 +35,18 @@ from calibration_utils.time_of_flight import (
 )
 
 from qualibration_libs.runtime import simulate_and_plot
+from qm_saas import QoPVersion, QmSaas
+email = "kharrison@u.northwestern.edu"
+password = "Qm47Hd92LfA03NcZtBv618Ry"
+ 
+
+# Initialize QOP simulator client
+client = QmSaas(email=email, password=password)
+
+# Choose your QOP version (QOP2.x.y or QOP3.x.y)
+# if you choose QOP3.x.y, make sure you are using an adequate config.
+# version = QoPVersion.v2_2_2
+version = QoPVersion.v3_2_0
 
 # %% {Node initialisation}
 description = """
@@ -46,7 +75,7 @@ node = QualibrationNode[Parameters, None](name="time_of_flight", description=des
 @node.run_action(skip_if=node.modes.external)
 def custom_param(node: QualibrationNode[Parameters, None]):
     # You can get type hinting in your IDE by typing node.parameters.
-    node.parameters.simulate = False
+    node.parameters.simulate = True
     node.parameters.resonators = ["q1_resonator", "q2_resonator"]
     node.parameters.multiplexed = True
     node.parameters.num_shots = 10
@@ -97,12 +126,19 @@ def create_qua_program(node: QualibrationNode[Parameters, None]):
 @node.run_action(skip_if=node.parameters.load_data_id is not None or not node.parameters.simulate)
 def simulate_qua_program(node: QualibrationNode[Parameters, None]):
     """Connect to the QOP and simulate the QUA program"""
-    # Connect to the QOP
-    qmm = QuantumMachinesManager(host=qop_ip, cluster_name=cluster_name)
-    # Simulate the QUA program, generate the waveform report and plot the simulated samples
-    samples, fig, wf_report = simulate_and_plot(qmm, config, node.namespace["qua_program"], node.parameters)
-    # Store the figure, waveform report and simulated samples
-    node.results["simulation"] = {"figure": fig, "wf_report": wf_report, "samples": samples}
+    # version = QoPVersion.v2_2_2
+    with client.simulator(version=version) as instance:  # Specify the QOP version
+        # Connect to the QOP
+        qop_ip = instance.host  # Write the QM router IP address
+        cluster_name = "CS_3"  # Write your cluster_name if version >= QOP220
+        qop_port = instance.port  # Write the QOP port if version < QOP220
+        headers = instance.default_connection_headers
+        qmm = QuantumMachinesManager(host=qop_ip, port=qop_port, connection_headers=headers)
+
+        # Simulate the QUA program, generate the waveform report and plot the simulated samples
+        samples, fig, wf_report = simulate_and_plot(qmm, config, node.namespace["qua_program"], node.parameters)
+        # Store the figure, waveform report and simulated samples
+        node.results["simulation"] = {"figure": fig, "wf_report": wf_report, "samples": samples}
 
 
 # %% {Execute}
@@ -110,24 +146,33 @@ def simulate_qua_program(node: QualibrationNode[Parameters, None]):
 def execute_qua_program(node: QualibrationNode[Parameters, None]):
     """Connect to the QOP, execute the QUA program and fetch the raw data and store it in a xarray dataset called "ds_raw"."""
     # Connect to the QOP
-    qmm = QuantumMachinesManager(host=qop_ip, cluster_name=cluster_name)
-    # Execute the QUA program only if the quantum machine is available (this is to avoid interrupting running jobs).
-    qm = qmm.open_qm(config)
-    # The job is stored in the node namespace to be reused in the fetching_data run_action
-    node.namespace["job"] = job = qm.execute(node.namespace["qua_program"])
-    # Names and values mapping
-    keys = []
+    with client.simulator(version=version) as instance:  # Specify the QOP version
+        # Connect to the QOP
+        
+        qop_ip = instance.host  # Write the QM router IP address
+        cluster_name = "CS_3"  # Write your cluster_name if version >= QOP220
+        qop_port = instance.port  # Write the QOP port if version < QOP220
+        headers = instance.default_connection_headers
+        qmm = QuantumMachinesManager(host=qop_ip, port=qop_port, connection_headers=headers)
 
-    for i in range(1, len(node.parameters.resonators) + 1):
-        keys.extend([f"adcI{i}", f"adcQ{i}", f"adc_single_runI{i}", f"adc_single_runQ{i}"])
-    data_fetcher = fetching_tool(job, data_list=keys, mode="wait_for_all")
-    values = data_fetcher.fetch_all()
-    # Display the execution report to expose possible runtime errors
-    node.log(job.execution_report())
-    # Register the raw dataset
-    node.results["raw_data"] = {}
-    for key, value in zip(keys, values):
-        node.results["raw_data"][key] = value
+        # qmm = QuantumMachinesManager(host=qop_ip, cluster_name=cluster_name)
+        # Execute the QUA program only if the quantum machine is available (this is to avoid interrupting running jobs).
+        qm = qmm.open_qm(config)
+        # The job is stored in the node namespace to be reused in the fetching_data run_action
+        node.namespace["job"] = job = qm.simulate(node.namespace["qua_program"], SimulationConfig(int(1000)))
+        # Names and values mapping
+        keys = []
+
+        for i in range(1, len(node.parameters.resonators) + 1):
+            keys.extend([f"adcI{i}", f"adcQ{i}", f"adc_single_runI{i}", f"adc_single_runQ{i}"])
+        data_fetcher = fetching_tool(job, data_list=keys, mode="wait_for_all")
+        values = data_fetcher.fetch_all()
+        # Display the execution report to expose possible runtime errors
+        node.log(job.execution_report())
+        # Register the raw dataset
+        node.results["raw_data"] = {}
+        for key, value in zip(keys, values):
+            node.results["raw_data"][key] = value
 
 
 # %% {Data_loading_and_dataset_creation}

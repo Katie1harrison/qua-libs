@@ -8,6 +8,7 @@ import numpy as np
 import plotly.io as pio
 from qualang_tools.config.waveform_tools import drag_gaussian_pulse_waveforms
 from qualang_tools.units import unit
+from qm_saas import QoPVersion, QmSaas
 
 pio.renderers.default = "browser"
 #######################
@@ -19,9 +20,24 @@ u = unit(coerce_to_integer=True)
 # Network parameters #
 ######################
 # qop_ip = "127.0.0.1"  # Write the QM router IP address
-qop_ip = "172.16.33.115"  # Write the QM router IP address
+email = "kharrison@u.northwestern.edu"
+password = "Qm47Hd92LfA03NcZtBv618Ry"
+ 
+
+# Initialize QOP simulator client
+client = QmSaas(email=email, password=password)
+
+# Choose your QOP version (QOP2.x.y or QOP3.x.y)
+# if you choose QOP3.x.y, make sure you are using an adequate config.
+# version = QoPVersion.v2_2_2
+#updated the version to 3.1.0
+version = QoPVersion.v3_2_0
+instance = client.simulator(version=version)
+qop_ip = instance.host  # Write the QM router IP address
 cluster_name = "CS_3"  # Write your cluster_name if version >= QOP220
-qop_port = None  # Write the QOP port if version < QOP220
+qop_port = instance.port  # Write the QOP port if version < QOP220
+headers = instance.default_connection_headers
+# print(qop_ip, qop_port, headers)
 
 default_additional_files = {
     Path(__file__).name: Path(__file__).name,
@@ -287,9 +303,9 @@ config = {
             },
         },
     },
+
     "elements": {
-        "q1": {
-            # MWInput corresponds to an OPX physical output port
+        "q1":{ # MWInput corresponds to an OPX physical output port
             "MWInput": {
                 "port": (con, mw_fem, 2),
                 "upconverter": 1,
@@ -308,8 +324,8 @@ config = {
                 "-y90": "-y90_pulse",
             },
         },
-        "q1_resonator": {
-            # MWInput corresponds to an OPX physical output port
+        "q1_resonator":
+        { # MWInput corresponds to an OPX physical output port
             "MWInput": {
                 "port": (con, mw_fem, 1),
                 "upconverter": 1,
@@ -354,8 +370,8 @@ config = {
                 "-y90": "-y90_pulse",
             },
         },
-        "q2_resonator": {
-            # MWInput corresponds to an OPX physical output port
+    
+        "q2_resonator": { #MWInput corresponds to an OPX physical output port
             "MWInput": {
                 "port": (con, mw_fem, 1),
                 "upconverter": 1,
@@ -557,3 +573,6 @@ config = {
         },
     },
 }
+
+
+# I'm using qm-qua 1.2.3, which explicitly supports OPX1000 MW-FEM and MWInput/MWOutput
