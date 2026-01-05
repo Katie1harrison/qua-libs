@@ -1,0 +1,6 @@
+[submodule "qualibration-libs"]
+	path = qualibration-libs
+	url = https://github.com/katie1harrison/qualibration-libs.git
+[submodule "quam-builder"]
+	path = quam-builder
+	url = https://github.com/katie1harrison/qualibration-libs.git
