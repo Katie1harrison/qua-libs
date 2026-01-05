@@ -167,7 +167,9 @@ resonator_power = 1  # power in dBm at waveform amp = 1
 readout_len = 5000
 readout_amp = 0.6
 
-time_of_flight = 28
+# time_of_flight = 28
+# ran the TOF experiment and updated the start time based on results. after the pulse is sent, it takes approx 752ns to reach the resonator
+time_of_flight = 752
 depletion_time = 2 * u.us
 
 
