@@ -21,9 +21,11 @@ from calibration_utils.power_rabi import (
     log_fitted_results,
     plot_raw_data_with_fit,
 )
+from calibration_utils.error_codes import PowerRabiErrorCode, PowerRabiCorrectiveAction
 from qualibration_libs.parameters import get_qubits
 from qualibration_libs.runtime import simulate_and_plot
 from qualibration_libs.data import XarrayDataFetcher
+from quam_config.instrument_limits import instrument_limits
 
 
 # %% {Description}
@@ -246,16 +248,106 @@ def plot_data(node: QualibrationNode[Parameters, Quam]):
 # %% {Update_state}
 @node.run_action(skip_if=node.parameters.simulate)
 def update_state(node: QualibrationNode[Parameters, Quam]):
-    """Update the relevant parameters if the qubit data analysis was successful."""
+    """Update the relevant parameters if the qubit data analysis was successful.
+
+    In adaptive mode (use_adaptive=True):
+    - NO_OSCILLATION: adds the qubit's RF frequency to the blacklist in temp_calibration.
+    - TOO_MANY_PERIODS: scales the base amplitude down (new = old / num_periods) so the next
+      run shows ~1 Rabi oscillation period across the amplitude sweep.
+    - TOO_FEW_PERIODS: scales the base amplitude up by the same formula.
+    - SUCCESS: behaves like normal (updates to the fitted optimal amplitude).
+    """
+    def _ensure_temp_calibration(machine, qubit_name: str):
+        """Return the TemporaryCalibrationData for qubit_name, creating it if absent."""
+        from quam_config.my_quam import TemporaryCalibrationData
+        if machine.temp_calibration is None:
+            machine.temp_calibration = {}
+        if qubit_name not in machine.temp_calibration:
+            machine.temp_calibration[qubit_name] = TemporaryCalibrationData()
+        temp_data = machine.temp_calibration[qubit_name]
+        # Backward-compatibility: add field if an older state.json omitted it
+        if not hasattr(temp_data, "blacklisted_qubit_frequencies"):
+            object.__setattr__(temp_data, "blacklisted_qubit_frequencies", None)
+        return temp_data
+
+    def _get_rf_frequency(qubit) -> float:
+        """Return the best available RF frequency estimate for the qubit XY channel."""
+        try:
+            return float(qubit.xy.LO_frequency + qubit.xy.intermediate_frequency)
+        except AttributeError:
+            return float(qubit.xy.intermediate_frequency)
+
     with node.record_state_updates():
         for q in node.namespace["qubits"]:
+            fit_result = node.results["fit_results"][q.name]
+            error_code = PowerRabiErrorCode(
+                fit_result.get("error_code", int(PowerRabiErrorCode.SUCCESS))
+            )
+
+            # ── Failed calibration ──────────────────────────────────────────────
             if node.outcomes[q.name] == "failed":
+                if node.parameters.use_adaptive and error_code == PowerRabiErrorCode.NO_OSCILLATION:
+                    # Blacklist the current qubit frequency so upstream nodes can avoid it
+                    temp_data = _ensure_temp_calibration(node.machine, q.name)
+                    rf_freq = _get_rf_frequency(q)
+                    if temp_data.blacklisted_qubit_frequencies is None:
+                        temp_data.blacklisted_qubit_frequencies = []
+                    if rf_freq not in temp_data.blacklisted_qubit_frequencies:
+                        temp_data.blacklisted_qubit_frequencies.append(rf_freq)
+                    fit_result["corrective_action"] = int(PowerRabiCorrectiveAction.BLACKLIST_FREQUENCY)
+                    fit_result["action_magnitude"] = rf_freq
+                    node.log(
+                        f"[Adaptive] {q.name}: No oscillation detected. "
+                        f"Blacklisted RF frequency {rf_freq / 1e9:.6f} GHz."
+                    )
                 continue
 
             operation = q.xy.operations[node.parameters.operation]
-            operation.amplitude = node.results["fit_results"][q.name]["opt_amp"]
-            if node.parameters.operation == "x180":
-                q.xy.operations["x90"].amplitude = node.results["fit_results"][q.name]["opt_amp"] / 2
+            limits = instrument_limits(q.xy)
+
+            # ── Adaptive: rescale base amplitude if period count is off ─────────
+            if node.parameters.use_adaptive and error_code in (
+                PowerRabiErrorCode.TOO_MANY_PERIODS,
+                PowerRabiErrorCode.TOO_FEW_PERIODS,
+            ):
+                num_periods = fit_result.get("num_periods", 1.0)
+                if num_periods > 0 and np.isfinite(num_periods):
+                    # Scale amplitude so the next run shows ~1 period:
+                    # Rabi frequency ∝ amplitude  →  new_amp = old_amp / num_periods
+                    current_amp = operation.amplitude
+                    new_amp = float(
+                        np.clip(current_amp / num_periods, 0.0, limits.max_x180_wf_amplitude)
+                    )
+                    operation.amplitude = new_amp
+                    if node.parameters.operation == "x180":
+                        q.xy.operations["x90"].amplitude = new_amp / 2
+
+                    corrective_action = (
+                        PowerRabiCorrectiveAction.REDUCE_AMPLITUDE
+                        if error_code == PowerRabiErrorCode.TOO_MANY_PERIODS
+                        else PowerRabiCorrectiveAction.INCREASE_AMPLITUDE
+                    )
+                    fit_result["corrective_action"] = int(corrective_action)
+                    fit_result["action_magnitude"] = new_amp
+                    node.log(
+                        f"[Adaptive] {q.name}: {error_code.name} "
+                        f"({num_periods:.2f} periods). "
+                        f"Rescaling {node.parameters.operation} amplitude: "
+                        f"{1e3 * current_amp:.2f} mV → {1e3 * new_amp:.2f} mV."
+                    )
+                else:
+                    # Degenerate case: fall back to normal update
+                    operation.amplitude = fit_result["opt_amp"]
+                    if node.parameters.operation == "x180":
+                        q.xy.operations["x90"].amplitude = fit_result["opt_amp"] / 2
+
+            # ── Normal update (non-adaptive, or adaptive SUCCESS) ────────────────
+            else:
+                operation.amplitude = fit_result["opt_amp"]
+                if node.parameters.operation == "x180":
+                    q.xy.operations["x90"].amplitude = fit_result["opt_amp"] / 2
+                if node.parameters.use_adaptive:
+                    fit_result["corrective_action"] = int(PowerRabiCorrectiveAction.NONE)
 
 
 # %% {Save_results}

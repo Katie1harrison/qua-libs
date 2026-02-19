@@ -27,6 +27,16 @@ class NodeSpecificParameters(RunnableParameters):
     frequency_span_in_mhz: float = 50
     frequency_step_in_mhz: float = 0.25
 
+    use_adaptive_span: bool = False
+    """
+    Enable adaptive calibration adjustments for subsequent runs.
+    When enabled, the node will automatically:
+    - No peak found: Increase frequency span (up to 800 MHz) AND power (+10 dBm)
+    - Weak peak at high power: Increase power only (+10 dBm), keep frequency span
+    - Over-saturation: Decrease power (-10 dBm)
+      (over-saturation = all power points show excessive linewidth or high baseline)
+    """
+
     # ------------------------------------------------------------------
     # Averaging
     # ------------------------------------------------------------------

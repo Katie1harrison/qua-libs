@@ -13,7 +13,8 @@ from qualang_tools.results import progress_counter
 from qualang_tools.units import unit
 
 from qualibrate import QualibrationNode
-from quam_config import Quam
+from quam_config import Quam, TemporaryCalibrationData
+from qualibration_libs.core import tracked_updates
 from calibration_utils.broad_resonator_spectroscopy import (
     Parameters,
     process_raw_dataset,
@@ -42,6 +43,7 @@ Prerequisites:
 
 State update:
     - The readout frequency: qubit.resonator.f_01 & qubit.resonator.RF_frequency
+    - The bare resonator frequency: qubit.resonator.frequency_bare
 """
 
 # Be sure to include [Parameters, Quam] so the node has proper type hinting
@@ -85,6 +87,22 @@ def create_qua_program(node: QualibrationNode[Parameters, Quam]):
         "qubit": xr.DataArray(qubits.get_names()),
         "detuning": xr.DataArray(dfs, attrs={"long_name": "readout frequency", "units": "Hz"}),
     }
+
+    # Temporarily set the readout power if readout_power_dbm is specified.
+    # The change is recorded for reversion at the end of update_state.
+    node.namespace["tracked_resonators"] = []
+    if node.parameters.readout_power_dbm is not None:
+        for qubit in qubits:
+            with tracked_updates(qubit.resonator, auto_revert=False, dont_assign_to_none=True) as resonator:
+                resonator.set_output_power(
+                    power_in_dbm=node.parameters.readout_power_dbm,
+                    max_amplitude=node.parameters.max_amp,
+                )
+                node.namespace["tracked_resonators"].append(resonator)
+        node.log(
+            f"Broad spectroscopy: temporarily set readout power to "
+            f"{node.parameters.readout_power_dbm:.1f} dBm (max_amp={node.parameters.max_amp})"
+        )
 
     # The QUA program stored in the node namespace to be transfer to the simulation and execution run_actions
     with program() as node.namespace["qua_program"]:
@@ -208,6 +226,19 @@ def plot_data(node: QualibrationNode[Parameters, Quam]):
 @node.run_action(skip_if=node.parameters.simulate)
 def update_state(node: QualibrationNode[Parameters, Quam]):
     """Update the relevant parameters if the qubit data analysis was successful."""
+    # Revert any temporary readout power change made in create_qua_program
+    for tracked_resonator in node.namespace.get("tracked_resonators", []):
+        tracked_resonator.revert_changes()
+
+    machine = node.machine
+
+    def _ensure_temp_calibration(machine, qubit_name: str):
+        if machine.temp_calibration is None:
+            machine.temp_calibration = {}
+        if qubit_name not in machine.temp_calibration:
+            machine.temp_calibration[qubit_name] = TemporaryCalibrationData()
+        return machine.temp_calibration[qubit_name]
+
     with node.record_state_updates():
         for q in node.namespace["qubits"]:
             if node.outcomes[q.name] == "failed":
@@ -219,10 +250,18 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
             if not res["success"] or not res["frequency"]:
                 continue
 
+            # Save the user's initial guess BEFORE overwriting (only on first run;
+            # retries must not clobber it so we can always restore the original value).
+            temp_data = _ensure_temp_calibration(machine, q.name)
+            if temp_data.initial_resonator_f01 is None:
+                temp_data.initial_resonator_f01 = float(q.resonator.f_01)
+                temp_data.initial_resonator_RF_frequency = float(q.resonator.RF_frequency)
+
             freq = float(res["frequency"])
 
             q.resonator.f_01 = freq
             q.resonator.RF_frequency = freq
+            q.resonator.frequency_bare = freq
 
 
 # %% {Save_results}

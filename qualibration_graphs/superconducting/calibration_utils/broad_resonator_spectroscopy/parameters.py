@@ -19,7 +19,18 @@ class NodeSpecificParameters(RunnableParameters):
     """Required prominence of the peaks to detect"""
     peak_width : Optional[tuple[float, float]] = (1, 10.0)
     """Required width of the peaks to detect in samples (min, max)"""
-    
+    blacklist_exclusion_radius_mhz: float = 10.0
+    """Exclusion radius around blacklisted resonator frequencies in MHz.
+    Detected dips within this distance of a blacklisted frequency are ignored.
+    Default is 10.0 MHz."""
+    readout_power_dbm: Optional[float] = None
+    """Readout power in dBm for the broad spectroscopy sweep.
+    If None, the current QUAM state power is used unchanged.
+    The QUAM state is reverted to its original value after the node finishes."""
+    max_amp: float = 0.1
+    """Maximum readout pulse amplitude (OPX units, 0–0.5).
+    Only used when readout_power_dbm is set. Default is 0.1."""
+
 
 class Parameters(
     NodeParameters,

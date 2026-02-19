@@ -28,6 +28,13 @@ class NodeSpecificParameters(BasePowerRabiParameters):
     """Maximum number of Rabi pulses per sweep (error amplification). Default is 1."""
     update_x90: bool = True
     """Flag to update the x90 pulse amplitude after calibrating x180. Default is True."""
+    use_adaptive: bool = False
+    """Enable adaptive calibration. When True:
+    - If no oscillation is found, the current qubit frequency is added to the blacklist in temp_calibration.
+    - If too many periods (>2) are found, the base pulse amplitude is scaled down so the next run
+      shows ~1 period (new_amp = current_amp / num_periods).
+    - If too few periods (<0.8) are found, the base pulse amplitude is scaled up similarly.
+    Default is False."""
 
 
 class EfNodeSpecificParameters(BasePowerRabiParameters):

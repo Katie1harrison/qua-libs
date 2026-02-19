@@ -51,6 +51,25 @@ def log_fitted_results(fit_results: Dict, log_callable=None):
         log_callable(s_qubit + s_freq + s_fwhm + s_freq + s_angle + s_saturation + s_x180)
 
 
+def _get_resonator_amplitude(machine, qubit_name: str, key: str, data: xr.Dataset) -> float:
+    """
+    Get resonator amplitude from temp_calibration with fallback to data statistics.
+
+    Tries machine.temp_calibration[qubit_name].resonator_amplitudes[key] first.
+    Falls back to IQ_abs min/max from the current dataset if not available.
+    """
+    try:
+        return machine.temp_calibration[qubit_name].resonator_amplitudes[key]
+    except (KeyError, TypeError, AttributeError):
+        qubit_data = data.sel(qubit=qubit_name).IQ_abs
+        if key == "min_amplitude":
+            return float(qubit_data.min())
+        elif key == "max_amplitude":
+            return float(qubit_data.max())
+        else:
+            raise ValueError(f"Unknown amplitude key: {key}")
+
+
 def process_raw_dataset(ds: xr.Dataset, node: QualibrationNode):
     ds = convert_IQ_to_V(ds, node.namespace["qubits"])
     ds = add_amplitude_and_phase(ds, "detuning", subtract_slope_flag=True)
@@ -137,8 +156,31 @@ def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
     # saturation_amp_success = np.abs(fit.saturation_amplitude) < limits[0].max_wf_amplitude
     saturation_amp_success = True
 
+    # Peak amplitude fraction check (same logic as qubit_spectroscopy_vs_power):
+    #   baseline       = temp_calibration resonator min_amplitude (fallback: IQ_abs.min)
+    #   max_amp        = temp_calibration resonator max_amplitude (fallback: IQ_abs.max)
+    #   min_peak_height = min_peak_fraction * (max_amp - baseline)
+    #   accepted if     peak_value - baseline >= min_peak_height
+    machine = node.machine
+    peak_heights = []
+    peak_height_ok = []
+    for q_name in fit.qubit.values:
+        baseline = _get_resonator_amplitude(machine, q_name, "min_amplitude", fit)
+        max_amp  = _get_resonator_amplitude(machine, q_name, "max_amplitude", fit)
+        min_peak_height = node.parameters.min_peak_fraction * (max_amp - baseline)
+        pos = float(fit.position.sel(qubit=q_name).values)
+        if np.isfinite(pos):
+            peak_val = float(fit.IQ_abs.sel(qubit=q_name, detuning=pos, method="nearest").values)
+            peak_height = peak_val - baseline
+        else:
+            peak_height = 0.0
+        peak_heights.append(peak_height)
+        peak_height_ok.append(peak_height >= min_peak_height)
+    fit = fit.assign({"peak_height": xr.DataArray(peak_heights, dims=["qubit"], coords={"qubit": fit.qubit})})
+    min_peak_fraction_success = xr.DataArray(peak_height_ok, dims=["qubit"], coords={"qubit": fit.qubit})
+
     # x180amp_success = np.abs(fit.x180_amplitude.data) < limits[0].max_x180_wf_amplitude
-    success_criteria = freq_success & fwhm_success & saturation_amp_success
+    success_criteria = freq_success & fwhm_success & saturation_amp_success & min_peak_fraction_success
     fit = fit.assign({"success": success_criteria})
 
     fit_results = {

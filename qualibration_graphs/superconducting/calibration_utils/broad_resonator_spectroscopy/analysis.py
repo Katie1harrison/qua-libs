@@ -34,17 +34,16 @@ def log_fitted_results(fit_results: Dict, log_callable=None):
 
     for q in fit_results.keys():
         s_qubit = f"Results for qubit {q}: "
-        s_freq = "Detected resonator frequency: "
-        f = fit_results[q]["frequency"]
-        s_freq += f"{1e-9 * f:.3f} GHz, "
-        s_freq += "\t"
 
         if fit_results[q]["success"]:
             s_qubit += " SUCCESS!\n"
+            f = fit_results[q]["frequency"]
+            s_qubit += f"Detected resonator frequency: {1e-9 * f:.3f} GHz"
         else:
             s_qubit += " FAIL!\n"
+            s_qubit += "No valid resonator dip detected."
 
-        log_callable(s_qubit + s_freq)
+        log_callable(s_qubit)
 
 
 # -----------------------------------------------------------------------------
@@ -97,7 +96,8 @@ def fit_raw_data(
 
 def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
     """
-    Select the dip closest to the initial resonator frequency for each qubit.
+    Select the dip closest to the initial resonator frequency for each qubit,
+    excluding any dips near blacklisted resonator frequencies.
     """
 
     fit.attrs = {"long_name": "frequency", "units": "Hz"}
@@ -118,6 +118,23 @@ def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
     res_freq_da = fit.positions + f_guess_da
     res_freq_da.attrs = {"long_name": "resonator frequency", "units": "Hz"}
 
+    # --- Blacklist filtering ---
+    # Mask out dips that are within exclusion_radius of any blacklisted frequency
+    exclusion_radius = getattr(node.parameters, "blacklist_exclusion_radius_mhz", 10.0) * 1e6
+    machine = node.machine
+    for i, q in enumerate(qubits):
+        blacklist = _get_blacklisted_resonator_frequencies(machine, q.name)
+        if not blacklist:
+            continue
+        for bl_freq in blacklist:
+            # Set dips near blacklisted frequency to NaN
+            too_close = np.abs(res_freq_da.isel(qubit=i) - bl_freq) < exclusion_radius
+            res_freq_da.values[i, too_close.values] = np.nan
+            node.log(
+                f"[Blacklist] {q.name}: Excluding dips within "
+                f"±{exclusion_radius / 1e6:.1f} MHz of {bl_freq / 1e9:.6f} GHz"
+            )
+
     # Distance from initial guess
     dist_da = abs(res_freq_da - f_guess_da)
     dist_da = dist_da.where(~np.isnan(res_freq_da))
@@ -135,7 +152,6 @@ def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
 
     # Success flag
     success = has_any_dip
-
 
     fit = fit.assign_coords(
         res_freq_all=res_freq_da,
@@ -163,6 +179,21 @@ def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
             )
 
     return fit, fit_results
+
+
+def _get_blacklisted_resonator_frequencies(machine, qubit_name: str) -> List[float]:
+    """Safely retrieve blacklisted resonator frequencies for a qubit from temp_calibration."""
+    try:
+        temp_cal = machine.temp_calibration
+        if temp_cal is None:
+            return []
+        temp_data = temp_cal.get(qubit_name)
+        if temp_data is None:
+            return []
+        bl = getattr(temp_data, "blacklisted_resonator_frequencies", None)
+        return list(bl) if bl else []
+    except (AttributeError, KeyError):
+        return []
 
 
 # -----------------------------------------------------------------------------

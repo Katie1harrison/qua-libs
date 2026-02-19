@@ -32,8 +32,19 @@ class NodeSpecificParameters(RunnableParameters):
     """
     Minimum absolute frequency shift (in Hz) between low and high power
     required to declare a Kerr-induced shift.
-    
+
     Typical values: 1e5 - 5e5 Hz, depending on resonator linewidth.
+    """
+
+    use_adaptive_span: bool = False
+    """
+    Enable adaptive span adjustment.
+
+    When enabled, if no frequency shift is detected and the resonator frequency
+    is at the bare frequency (from quam state) for both power points, the power
+    span (max_power_dbm and min_power_dbm) is decreased by 10 dB for the next iteration.
+
+    This helps find the optimal power range when the initial power is too high.
     """
 
 

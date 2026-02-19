@@ -21,6 +21,8 @@ class NodeSpecificParameters(RunnableParameters):
     """Target peak width in Hz. Default is 3e6 Hz."""
     update_pulses_amplitude: bool = False
     """Whether to update the saturation pulse and x180/x90 pulse amplitudes based on the peak width. Default is False"""
+    min_peak_fraction: float = 0.3
+    """Minimum required peak amplitude as a fraction of the IQ_abs (max - min) range. Peaks smaller than this fraction are rejected. Default is 0.3."""
 
 
 class Parameters(

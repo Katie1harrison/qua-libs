@@ -115,7 +115,7 @@ def plot_individual_raw_data_with_fit(
         detuning_opt_MHz = fit.freq_shift * 1e-6
 
         ax2.axvline(
-            x=-detuning_opt_MHz,
+            x=detuning_opt_MHz,
             color="blue",
             linestyle="--",
         )

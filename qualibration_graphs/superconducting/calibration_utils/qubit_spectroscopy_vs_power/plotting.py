@@ -36,7 +36,7 @@ def plot_raw_data_with_fit(
 
     grid.fig.suptitle("Qubit spectroscopy (raw |IQ|, mV)")
     grid.fig.set_size_inches(15, 10)
-    grid.fig.tight_layout()
+    grid.fig.subplots_adjust(top=0.90, bottom=0.08, left=0.07, right=0.97, hspace=0.40)
 
     return grid.fig
 
@@ -97,19 +97,18 @@ def plot_qubit_spectro_vs_power(
 
     ax.set_ylabel("Drive power [dBm]")
 
-    # Top axis: detuning
-    if "detuning" in ds_q:
-        ax_top = ax.twiny()
-        ds_q = ds_q.assign_coords(detuning_MHz=ds_q.detuning / u.MHz)
-
-        ds_q.IQ_abs_mV.plot(
-            ax=ax_top,
-            x="detuning_MHz",
-            y="power",
-            add_colorbar=False,
-            robust=True,
+    # Top axis: detuning (via coordinate transform — avoids twiny+tight_layout stretch bug)
+    if "detuning" in ds_q and ds_q.detuning.size > 0:
+        det0 = float(ds_q.detuning[0])
+        ff0 = float(ds_q.full_freq[0])
+        rf_freq_GHz = (ff0 - det0) / u.GHz  # constant RF carrier in GHz
+        ax_top = ax.secondary_xaxis(
+            "top",
+            functions=(
+                lambda f: (f - rf_freq_GHz) * 1e3,   # GHz → MHz detuning
+                lambda d: d / 1e3 + rf_freq_GHz,      # MHz detuning → GHz
+            ),
         )
-
         ax_top.set_xlabel("Detuning [MHz]")
 
     # Selected power
@@ -141,12 +140,14 @@ def plot_qubit_spectro_at_selected_power(
 ):
     ds_q = ds.loc[qubit]
 
-    if "selected_power" not in ds_q:
-        ax.text(0.5, 0.5, "No selected power", ha="center")
-        ax.set_axis_off()
-        return
+    if "selected_power" in ds_q:
+        p_sel = float(ds_q.selected_power)
+        label = f"Slice at {p_sel:.1f} dBm"
+    else:
+        # No optimal power found — fall back to the highest power in the sweep
+        p_sel = float(ds_q.power.max())
+        label = f"Slice at max power: {p_sel:.1f} dBm"
 
-    p_sel = float(ds_q.selected_power)
     ds_slice = ds_q.sel(power=p_sel, method="nearest")
 
     x = ds_slice.full_freq / u.GHz
@@ -154,7 +155,7 @@ def plot_qubit_spectro_at_selected_power(
     ax.plot(x, ds_slice.IQ_abs_mV, linewidth=2)
     ax.set_ylabel("|IQ| [mV]")
     ax.set_xlabel("RF frequency [GHz]")
-    ax.set_title(f"Slice at {p_sel:.1f} dBm", fontsize=9)
+    ax.set_title(label, fontsize=9)
 
     if "rough_qubit_frequency" in ds_q:
         f_sel = float(ds_q.rough_qubit_frequency) / u.GHz

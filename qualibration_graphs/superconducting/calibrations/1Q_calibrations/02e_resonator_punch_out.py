@@ -12,7 +12,7 @@ from qualang_tools.results import progress_counter
 from qualang_tools.units import unit
 
 from qualibrate import QualibrationNode
-from quam_config import Quam
+from quam_config import Quam, TemporaryCalibrationData
 from calibration_utils.resonator_punch_out import (
     Parameters,
     process_raw_dataset,
@@ -20,11 +20,58 @@ from calibration_utils.resonator_punch_out import (
     log_fitted_results,
     plot_raw_data_with_fit,
 )
+from calibration_utils.error_codes import (
+    ResonatorPunchOutErrorCode,
+    ResonatorPunchOutCorrectiveAction,
+)
 from quam_builder.tools.power_tools import calculate_voltage_scaling_factor
 from qualibration_libs.parameters import get_qubits
 from qualibration_libs.runtime import simulate_and_plot
 from qualibration_libs.data import XarrayDataFetcher
 from qualibration_libs.core import tracked_updates
+
+
+# %% {Helper functions}
+def _ensure_temp_calibration_fields(machine, qubit_name: str) -> TemporaryCalibrationData:
+    """
+    Ensure temp_calibration data has all required fields.
+
+    This is needed for backward compatibility when loading old state.json files
+    that don't have newly added fields. Adds missing fields directly to the
+    existing object using object.__setattr__ to bypass QUAM's property system.
+
+    Args:
+        machine: The QUAM machine object
+        qubit_name: Name of the qubit
+
+    Returns:
+        TemporaryCalibrationData object with all fields properly initialized
+    """
+    # Initialize if not present
+    if qubit_name not in machine.temp_calibration:
+        machine.temp_calibration[qubit_name] = TemporaryCalibrationData()
+        return machine.temp_calibration[qubit_name]
+
+    temp_data = machine.temp_calibration[qubit_name]
+
+    # Define all expected fields with their default values
+    expected_fields = {
+        'resonator_amplitudes': None,
+        'parameters': None,
+        'adaptive_frequency_span_mhz': None,
+        'adaptive_power_shift_dbm': None,
+        'adaptive_num_shots': None,
+        'last_updated': None,
+        'notes': None,
+    }
+
+    # Add any missing fields directly using object.__setattr__
+    # This bypasses QUAM's property system and adds the field to the instance
+    for field_name, default_value in expected_fields.items():
+        if not hasattr(temp_data, field_name):
+            object.__setattr__(temp_data, field_name, default_value)
+
+    return temp_data
 
 
 # %% {Node initialisation}
@@ -54,6 +101,9 @@ State update:
       optimal readout power:
           * qubit.resonator.f_01
           * qubit.resonator.RF_frequency
+    - Adaptive parameters in temp_calibration (when use_adaptive_span=True):
+      * On power too high (no shift + at bare frequency): decreases power span by 10 dB
+      * On success: resets adaptive_power_shift_dbm
 """
 
 
@@ -88,24 +138,50 @@ def create_qua_program(node: QualibrationNode[Parameters, Quam]):
     # Get the active qubits from the node and organize them by batches
     node.namespace["qubits"] = qubits = get_qubits(node)
     num_qubits = len(qubits)
+
+    # Extract the sweep parameters and axes from the node parameters
+    n_avg = node.parameters.num_shots
+
+    # Use adaptive power shift if available (from previous failed calibrations)
+    min_power_dbm = node.parameters.min_power_dbm
+    max_power_dbm = node.parameters.max_power_dbm
+
+    if node.parameters.use_adaptive_span and node.machine.temp_calibration is not None:
+        # Collect adaptive power shifts from all active qubits and apply the
+        # most conservative (most negative) shift so the sweep stays valid for
+        # every qubit in the batch.
+        shifts = []
+        for qubit in qubits:
+            temp_data = _ensure_temp_calibration_fields(node.machine, qubit.name)
+            if temp_data.adaptive_power_shift_dbm is not None:
+                shifts.append(temp_data.adaptive_power_shift_dbm)
+
+        if shifts:
+            power_shift = min(shifts)  # most negative = most conservative
+            min_power_dbm += power_shift
+            node.log(
+                f"Using adaptive power shift: {power_shift:.1f} dBm "
+                f"(from {[q.name for q in qubits]})\n"
+                f"  Min power: {min_power_dbm:.1f} dBm\n"
+                f"  Max power: {max_power_dbm:.1f} dBm"
+            )
+
     # Update the readout power to match the desired range, this change will be reverted at the end of the node.
     node.namespace["tracked_resonators"] = []
     for i, qubit in enumerate(qubits):
         with tracked_updates(qubit.resonator, auto_revert=False, dont_assign_to_none=True) as resonator:
             resonator.set_output_power(
-                power_in_dbm=node.parameters.max_power_dbm,
+                power_in_dbm=max_power_dbm,
                 max_amplitude=node.parameters.max_amp,
             )
             node.namespace["tracked_resonators"].append(resonator)
 
-    # Extract the sweep parameters and axes from the node parameters
-    n_avg = node.parameters.num_shots
     # The readout amplitude sweep (as a pre-factor of the readout amplitude) - must be within [-2; 2)
-    amp_min = calculate_voltage_scaling_factor(node.parameters.max_power_dbm, node.parameters.min_power_dbm)
+    amp_min = calculate_voltage_scaling_factor(max_power_dbm, min_power_dbm)
     amps = np.geomspace(amp_min, 1, node.parameters.num_power_points)
     power_dbm = np.linspace(
-        node.parameters.min_power_dbm,
-        node.parameters.max_power_dbm,
+        min_power_dbm,
+        max_power_dbm,
         node.parameters.num_power_points,
     )
     # The frequency sweep around the resonator resonance frequency
@@ -248,20 +324,119 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
     for tracked_resonator in node.namespace.get("tracked_resonators", []):
         tracked_resonator.revert_changes()
 
+    # Ensure temp_calibration exists
+    if node.machine.temp_calibration is None:
+        node.machine.temp_calibration = {}
+
+    # Constants for adaptive power adjustment
+    POWER_DECREASE_DBM = -10.0  # Decrease power when no shift detected (power too high)
+    MIN_POWER_DBM = -100.0      # Minimum allowed power
+    FREQUENCY_TOLERANCE_HZ = 1e6  # 1 MHz tolerance for checking if at bare frequency
+
     # Update the state
     with node.record_state_updates():
         for q in node.namespace["qubits"]:
-            if node.outcomes[q.name] == "failed":
+            # Ensure all temp_calibration fields exist
+            temp_data = _ensure_temp_calibration_fields(node.machine, q.name)
+
+            # Get fit results for this qubit
+            fit_result = node.results["fit_results"][q.name]
+            freq_shift = fit_result["frequency_shift"]
+            resonator_frequency = fit_result["resonator_frequency"]
+            bare_frequency = q.resonator.frequency_bare
+            error_code = ResonatorPunchOutErrorCode(fit_result.get("error_code", 0))
+
+            # Check for wrong shift direction first - no corrective action possible
+            if error_code == ResonatorPunchOutErrorCode.WRONG_SHIFT_DIRECTION:
+                node.results["fit_results"][q.name]["corrective_action"] = int(ResonatorPunchOutCorrectiveAction.NONE)
+                node.log(
+                    f"[{q.name}] ERROR CODE: WRONG_SHIFT_DIRECTION ({ResonatorPunchOutErrorCode.WRONG_SHIFT_DIRECTION})\n"
+                    f"  CORRECTIVE ACTION: NONE\n"
+                    f"  Resonator shifted to higher frequency at high power - unexpected direction.\n"
+                    f"  Expected: freq_low - freq_high > 0 (Kerr shift lowers resonance at high power).\n"
+                    f"  Measured shift: {freq_shift / 1e6:.3f} MHz (negative = wrong direction)\n"
+                    f"  Measured frequency: {resonator_frequency / 1e9:.6f} GHz\n"
+                    f"  Manual inspection required."
+                )
                 continue
+
+            # Check if power is too high (no/small positive shift and at bare frequency)
+            # freq_shift = freq_low - freq_high, so positive means resonator shifted down at high power
+            no_shift = freq_shift < node.parameters.frequency_shift_threshold_in_hz
+            at_bare_frequency = abs(resonator_frequency - bare_frequency) < FREQUENCY_TOLERANCE_HZ
+            power_too_high = no_shift and at_bare_frequency
+
+            if node.outcomes[q.name] == "failed":
+                # Handle failed calibration with adaptive power adjustment
+                if node.parameters.use_adaptive_span and power_too_high:
+                    # Get current power shift
+                    current_power_shift = temp_data.adaptive_power_shift_dbm or 0.0
+                    new_power_shift = current_power_shift + POWER_DECREASE_DBM
+
+                    # Check if we can decrease power further
+                    if node.parameters.min_power_dbm + new_power_shift >= MIN_POWER_DBM:
+                        temp_data.adaptive_power_shift_dbm = new_power_shift
+
+                        # Update error code to indicate at bare frequency
+                        node.results["fit_results"][q.name]["error_code"] = int(ResonatorPunchOutErrorCode.AT_BARE_FREQUENCY)
+                        node.results["fit_results"][q.name]["corrective_action"] = int(ResonatorPunchOutCorrectiveAction.DECREASE_POWER_SPAN)
+                        node.results["fit_results"][q.name]["action_magnitude"] = float(POWER_DECREASE_DBM)
+
+                        node.log(
+                            f"[{q.name}] ERROR CODE: AT_BARE_FREQUENCY ({ResonatorPunchOutErrorCode.AT_BARE_FREQUENCY})\n"
+                            f"  CORRECTIVE ACTION: DECREASE_POWER_SPAN ({POWER_DECREASE_DBM} dBm)\n"
+                            f"  Bare frequency:       {bare_frequency / 1e9:.6f} GHz\n"
+                            f"  Measured frequency:   {resonator_frequency / 1e9:.6f} GHz\n"
+                            f"  Frequency shift:      {freq_shift / 1e6:.3f} MHz\n"
+                            f"  Current power shift:  {current_power_shift:.1f} dBm\n"
+                            f"  New power shift:      {new_power_shift:.1f} dBm\n"
+                            f"  Next min power:       {node.parameters.min_power_dbm + new_power_shift:.1f} dBm\n"
+                            f"  Next max power:       {node.parameters.max_power_dbm + new_power_shift:.1f} dBm"
+                        )
+                    else:
+                        node.results["fit_results"][q.name]["corrective_action"] = int(ResonatorPunchOutCorrectiveAction.NONE)
+                        node.log(
+                            f"[{q.name}] ERROR CODE: AT_BARE_FREQUENCY ({ResonatorPunchOutErrorCode.AT_BARE_FREQUENCY})\n"
+                            f"  CORRECTIVE ACTION: NONE (minimum power limit reached: {MIN_POWER_DBM} dBm)"
+                        )
+                else:
+                    node.results["fit_results"][q.name]["corrective_action"] = int(ResonatorPunchOutCorrectiveAction.NONE)
+                    node.log(
+                        f"[{q.name}] ERROR CODE: {error_code.name} ({error_code.value})\n"
+                        f"  CORRECTIVE ACTION: NONE (adaptive adjustments {'disabled' if not node.parameters.use_adaptive_span else 'not applicable'})"
+                    )
+                continue
+
+            # -----------------------------
+            # Successful calibration: reset adaptive parameters and update state
+            # -----------------------------
+            temp_data.adaptive_frequency_span_mhz = None
+            temp_data.adaptive_power_shift_dbm = None
+            temp_data.adaptive_num_shots = None
+
+            # Update fit results with success corrective action
+            node.results["fit_results"][q.name]["corrective_action"] = int(ResonatorPunchOutCorrectiveAction.RESET_ADAPTIVE_PARAMS)
+            node.results["fit_results"][q.name]["action_magnitude"] = 0.0
 
             # Update the readout power
             q.resonator.set_output_power(
-                power_in_dbm=node.results["fit_results"][q.name]["optimal_power"],
+                power_in_dbm=fit_result["optimal_power"],
                 max_amplitude=node.parameters.max_amp,
             )
-            # Update the readout frequency for the given flux point
-            q.resonator.f_01 -= node.results["fit_results"][q.name]["frequency_shift"]
-            q.resonator.RF_frequency -= node.results["fit_results"][q.name]["frequency_shift"]
+            # Set the resonator frequency directly to the measured low-power resonance.
+            # This is more robust than incrementing by freq_shift, which can accumulate errors.
+            freq_low_abs = fit_result["freq_low_abs"]
+            q.resonator.f_01 = freq_low_abs
+            q.resonator.RF_frequency = freq_low_abs
+
+            node.log(
+                f"[{q.name}] ERROR CODE: {error_code.name} ({error_code.value})\n"
+                f"  CORRECTIVE ACTION: RESET_ADAPTIVE_PARAMS\n"
+                f"  Updated state:\n"
+                f"    Optimal power:          {fit_result['optimal_power']:.2f} dBm\n"
+                f"    Low-power frequency:    {freq_low_abs / 1e9:.6f} GHz\n"
+                f"    Frequency shift:        {freq_shift / 1e6:.3f} MHz"
+            )
 
 
 # %% {Save_results}

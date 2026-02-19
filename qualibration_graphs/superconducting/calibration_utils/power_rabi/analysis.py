@@ -8,16 +8,29 @@ from qualibrate import QualibrationNode
 from qualibration_libs.analysis import fit_oscillation
 from qualibration_libs.data import add_amplitude_and_phase, convert_IQ_to_V
 from quam_config.instrument_limits import instrument_limits
+from calibration_utils.error_codes import PowerRabiErrorCode, PowerRabiCorrectiveAction
+
+# Thresholds for period-count classification (in adaptive mode)
+_TOO_MANY_PERIODS_THRESHOLD = 2.0   # more than 2 full oscillations → base amp too high
+_TOO_FEW_PERIODS_THRESHOLD = 0.8    # less than 0.8 oscillations  → base amp too low
 
 
 @dataclass
 class FitParameters:
-    """Stores the relevant qubit spectroscopy experiment fit parameters for a single qubit"""
+    """Stores the relevant power Rabi experiment fit parameters for a single qubit."""
 
     opt_amp_prefactor: float
     opt_amp: float
     operation: str
     success: bool
+    num_periods: float = float("nan")
+    """Number of Rabi oscillation periods detected across the amplitude sweep."""
+    error_code: int = int(PowerRabiErrorCode.SUCCESS)
+    """PowerRabiErrorCode: classification of the calibration result."""
+    corrective_action: int = int(PowerRabiCorrectiveAction.NONE)
+    """PowerRabiCorrectiveAction: action applied (or to be applied) to fix the issue."""
+    action_magnitude: float = 0.0
+    """Magnitude of the corrective action (interpretation depends on corrective_action)."""
 
 
 def log_fitted_results(fit_results: Dict, log_callable=None):
@@ -41,6 +54,12 @@ def log_fitted_results(fit_results: Dict, log_callable=None):
             f"{1e3 * fit_results[q]['opt_amp']:.2f} mV "
             f"(x{fit_results[q]['opt_amp_prefactor']:.2f})\n "
         )
+        num_periods = fit_results[q].get("num_periods", float("nan"))
+        if np.isfinite(num_periods):
+            s_amp += f"Rabi periods in sweep: {num_periods:.2f}\n "
+        error_code = fit_results[q].get("error_code", 0)
+        if error_code != 0:
+            s_amp += f"Error code: {PowerRabiErrorCode(error_code).name}\n "
         if fit_results[q]["success"]:
             s_qubit += " SUCCESS!\n"
         else:
@@ -123,12 +142,12 @@ def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
     # Get resonator amplitude range for each qubit
     qubit_names = fit.qubit.values
     min_resonator_amp = xr.DataArray(
-        [node.machine.resonator_amplitudes[q]["min_amplitude"] for q in qubit_names],
+        [node.machine.temp_calibration[q].resonator_amplitudes["min_amplitude"] for q in qubit_names],
         dims=["qubit"],
         coords={"qubit": qubit_names},
     )
     max_resonator_amp = xr.DataArray(
-        [node.machine.resonator_amplitudes[q]["max_amplitude"] for q in qubit_names],
+        [node.machine.temp_calibration[q].resonator_amplitudes["max_amplitude"] for q in qubit_names],
         dims=["qubit"],
         coords={"qubit": qubit_names},
     )
@@ -200,7 +219,7 @@ def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
     # Check 2: Amplitude within instrument limits
     amp_success = fit.opt_amp < limits[0].max_x180_wf_amplitude
 
-    # Check 3: Rabi oscillation amplitude is at least 50% of expected maximum
+    # Check 3: Rabi oscillation amplitude is at least 20% of expected maximum
     # (based on resonator amplitude range from previous calibrations)
     if max_pulses == 1:
         rabi_amplitude = fit.fit.sel(fit_vals="a")  # Fitted oscillation amplitude
@@ -212,14 +231,50 @@ def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
 
     success_criteria = ~nan_success & amp_success & rabi_amp_sufficient
     fit = fit.assign({"success": success_criteria})
-    # Populate the FitParameters class with fitted values
-    fit_results = {
-        q: FitParameters(
-            opt_amp_prefactor=fit.sel(qubit=q).opt_amp_prefactor.values.__float__(),
-            opt_amp=fit.sel(qubit=q).opt_amp.values.__float__(),
+
+    # Compute number of Rabi periods per qubit (only possible for single-pulse sweep)
+    sweep_range = float(
+        fit.amp_prefactor.values[-1] - fit.amp_prefactor.values[0]
+    ) if max_pulses == 1 else float("nan")
+
+    # Populate the FitParameters class with fitted values and error codes
+    fit_results = {}
+    for q in fit.qubit.values:
+        q_success = fit.sel(qubit=q).success.values.__bool__()
+        q_opt_amp_prefactor = fit.sel(qubit=q).opt_amp_prefactor.values.__float__()
+        q_opt_amp = fit.sel(qubit=q).opt_amp.values.__float__()
+
+        # Determine number of periods and error code
+        if max_pulses == 1:
+            freq_q = float(fit.sel(qubit=q).fit.sel(fit_vals="f").item())
+            num_periods = abs(freq_q) * sweep_range
+            q_rabi_sufficient = bool(rabi_amp_sufficient.sel(qubit=q).item())
+
+            if not q_success:
+                if not q_rabi_sufficient:
+                    error_code = PowerRabiErrorCode.NO_OSCILLATION
+                else:
+                    # NaN or amplitude limit exceeded – treat as no useful oscillation
+                    error_code = PowerRabiErrorCode.NO_OSCILLATION
+            elif num_periods > _TOO_MANY_PERIODS_THRESHOLD:
+                error_code = PowerRabiErrorCode.TOO_MANY_PERIODS
+            elif num_periods < _TOO_FEW_PERIODS_THRESHOLD:
+                error_code = PowerRabiErrorCode.TOO_FEW_PERIODS
+            else:
+                error_code = PowerRabiErrorCode.SUCCESS
+        else:
+            # With error amplification we cannot count periods from a single-pulse fit
+            num_periods = float("nan")
+            error_code = PowerRabiErrorCode.SUCCESS if q_success else PowerRabiErrorCode.NO_OSCILLATION
+
+        fit_results[q] = FitParameters(
+            opt_amp_prefactor=q_opt_amp_prefactor,
+            opt_amp=q_opt_amp,
             operation=operation,
-            success=fit.sel(qubit=q).success.values.__bool__(),
+            success=q_success,
+            num_periods=num_periods,
+            error_code=int(error_code),
+            corrective_action=int(PowerRabiCorrectiveAction.NONE),
+            action_magnitude=0.0,
         )
-        for q in fit.qubit.values
-    }
     return fit, fit_results
