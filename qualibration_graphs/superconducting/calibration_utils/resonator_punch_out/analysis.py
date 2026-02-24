@@ -91,7 +91,8 @@ def fit_raw_data(
             "Shift-based resonator analysis requires exactly 2 power points."
         )
 
-    P_low, P_high = powers[0], powers[1]
+    # Use Python floats to avoid numpy scalar issues with xr.where below
+    P_low, P_high = float(powers[0]), float(powers[-1])
 
     freq_low = []
     freq_high = []
@@ -99,11 +100,14 @@ def fit_raw_data(
     for q in node.namespace["qubits"]:
         name = q.name
 
-        low_power_data = ds.sel(qubit=name, power=P_low).IQ_abs
-        high_power_data = ds.sel(qubit=name, power=P_high).IQ_abs
+        # Use isel (integer position) instead of sel (label matching) to guarantee
+        # the power dimension is dropped regardless of float precision issues.
+        # squeeze() removes any accidental size-1 dimensions before idxmin.
+        low_power_data = ds.sel(qubit=name).isel(power=0).IQ_abs.squeeze()
+        high_power_data = ds.sel(qubit=name).isel(power=-1).IQ_abs.squeeze()
 
-        f0 = low_power_data.detuning[low_power_data.argmin(dim="detuning")].item()
-        f1 = high_power_data.detuning[high_power_data.argmin(dim="detuning")].item()
+        f0 = low_power_data.idxmin(dim="detuning").item()
+        f1 = high_power_data.idxmin(dim="detuning").item()
 
         freq_low.append(f0)
         freq_high.append(f1)

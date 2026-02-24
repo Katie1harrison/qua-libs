@@ -19,7 +19,7 @@ u = unit(coerce_to_integer=True)
 def plot_raw_data_with_fit(
     ds: xr.Dataset,
     qubits: List[AnyTransmon],
-    fits: xr.Dataset | None = None,  # API compatibility
+    fits: xr.Dataset | None = None,
 ) -> Figure:
     """
     Plot for each qubit:
@@ -29,12 +29,20 @@ def plot_raw_data_with_fit(
 
     ds = _ensure_iq_magnitude_mV(ds)
 
+    # fit_raw_data may return a *new* Dataset object (when _mask_blacklisted_detunings
+    # creates a copy), so ds_raw may be missing the fit-result variables.
+    # Merge them in from fits so the overlay lines and the 1D power slice work correctly.
+    if fits is not None:
+        for var in ["selected_power", "rough_qubit_frequency"]:
+            if var in fits and var not in ds:
+                ds = ds.assign({var: fits[var]})
+
     grid = QubitGrid(ds, [q.grid_location for q in qubits])
 
     for ax, qubit in grid_iter(grid):
         _plot_combined_cell(ax, ds, qubit)
 
-    grid.fig.suptitle("Qubit spectroscopy (raw |IQ|, mV)")
+    grid.fig.suptitle("Qubit spectroscopy vs power (raw |IQ|, mV)")
     grid.fig.set_size_inches(15, 10)
     grid.fig.subplots_adjust(top=0.90, bottom=0.08, left=0.07, right=0.97, hspace=0.40)
 
@@ -140,7 +148,7 @@ def plot_qubit_spectro_at_selected_power(
 ):
     ds_q = ds.loc[qubit]
 
-    if "selected_power" in ds_q:
+    if "selected_power" in ds_q and np.isfinite(float(ds_q.selected_power)):
         p_sel = float(ds_q.selected_power)
         label = f"Slice at {p_sel:.1f} dBm"
     else:
@@ -173,5 +181,5 @@ def plot_qubit_spectro_at_selected_power(
 
 def _ensure_iq_magnitude_mV(ds: xr.Dataset) -> xr.Dataset:
     if "IQ_abs_mV" not in ds:
-        ds["IQ_abs_mV"] = 1e3 * np.sqrt(ds.I ** 2 + ds.Q ** 2)
+        ds["IQ_abs_mV"] = 1e3 * ds.IQ_abs
     return ds

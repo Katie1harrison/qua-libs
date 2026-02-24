@@ -13,7 +13,7 @@ u = unit(coerce_to_integer=True)
 
 def plot_raw_data_with_fit(ds: xr.Dataset, qubits: List[AnyTransmon], fits: xr.Dataset):
     """
-    Plots the resonator spectroscopy amplitude IQ_abs with fitted curves for the given qubits.
+    Plots the qubit spectroscopy rotated I quadrature with fitted curves for the given qubits.
 
     Parameters
     ----------
@@ -38,7 +38,7 @@ def plot_raw_data_with_fit(ds: xr.Dataset, qubits: List[AnyTransmon], fits: xr.D
     for ax, qubit in grid_iter(grid):
         plot_individual_data_with_fit(ax, ds, qubit, fits.sel(qubit=qubit["qubit"]))
 
-    grid.fig.suptitle("Qubit spectroscopy (rotated 'I' quadrature + fit)")
+    grid.fig.suptitle("Qubit spectroscopy (|IQ| amplitude + fit)")
     grid.fig.set_size_inches(15, 9)
     grid.fig.tight_layout()
     return grid.fig

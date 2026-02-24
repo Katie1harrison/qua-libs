@@ -17,6 +17,8 @@ class FitParameters:
     decay: float
     decay_error: float
     success: bool
+    chi2: float = float("nan")
+    """Residual chi-squared: SS_res / ((N-5)·a²); chi2 > 2 → fit failed (no oscillation)."""
 
 
 def log_fitted_results(fit_results: Dict, log_callable=None):
@@ -37,6 +39,9 @@ def log_fitted_results(fit_results: Dict, log_callable=None):
         s_qubit = f"Results for qubit {q}: "
         s_detuning = f"\tDetuning to correct: {1e-6 * fit_results[q]['freq_offset']:.3f} MHz | "
         s_T2 = f"T2*: {1e6 * fit_results[q]['decay']:.1f} µs\n"
+        chi2_val = fit_results[q].get("chi2", float("nan"))
+        if np.isfinite(chi2_val):
+            s_T2 += f"\tResidual chi2: {chi2_val:.3f}\n"
         if fit_results[q]["success"]:
             s_qubit += " SUCCESS!\n"
         else:
@@ -77,6 +82,73 @@ def fit_raw_data(ds: xr.Dataset, node: QualibrationNode) -> Tuple[xr.Dataset, di
     return ds_fit, fit_results
 
 
+def _compute_chi2(ds_fit: xr.Dataset, node: QualibrationNode) -> xr.DataArray:
+    """
+    Compute a pooled residual chi-squared for the Ramsey oscillation fit across
+    both detuning traces.
+
+        chi2 = (SS_res_+ + SS_res_-) / ((N - P) * (a_+² + a_-²))
+
+    where SS_res_i is the sum of squared residuals for trace i, N is the number
+    of idle_time points, P = 5 free parameters (a, f, φ, offset, decay), and
+    a_i is the fitted oscillation amplitude for trace i.
+
+    Pooling both traces produces a single statistic that is insensitive to
+    the relative scale of the two amplitudes: when the amplitudes are equal it
+    reduces to the per-trace formula, and when they differ the trace with the
+    larger signal contributes more weight to the normalization.
+
+        chi2 ≤ 2  →  oscillation detected
+        chi2 > 2  →  residuals dominate; fit failed
+    """
+    from qualibration_libs.analysis.models import oscillation_decay_exp as _osc_decay
+
+    t = ds_fit.idle_time.values  # (N,)
+    N = len(t)
+    P = 5  # a, f, phi, offset, decay
+
+    chi2_values = []
+    for q in ds_fit.qubit.values:
+        if N <= P:
+            chi2_values.append(float("inf"))
+            continue
+
+        sum_SS_res = 0.0
+        sum_a2 = 0.0
+        invalid = False
+
+        for sign in ds_fit.detuning_signs.values:
+            fit_qs = ds_fit["fit"].sel(qubit=q, detuning_signs=sign)
+
+            a = float(fit_qs.sel(fit_vals="a").item())
+            f = float(fit_qs.sel(fit_vals="f").item())
+            phi = float(fit_qs.sel(fit_vals="phi").item())
+            offset = float(fit_qs.sel(fit_vals="offset").item())
+            decay_val = float(fit_qs.sel(fit_vals="decay").item())
+
+            if not np.isfinite(a) or a == 0.0:
+                invalid = True
+                break
+
+            if node.parameters.use_state_discrimination:
+                data = ds_fit.state.sel(qubit=q, detuning_signs=sign).values
+            else:
+                data = ds_fit.I.sel(qubit=q, detuning_signs=sign).values
+
+            fitted = _osc_decay(t, a, f, phi, offset, decay_val)
+            sum_SS_res += float(np.sum((data - fitted) ** 2))
+            sum_a2 += a ** 2
+
+        if invalid or sum_a2 <= 0.0:
+            chi2_values.append(float("inf"))
+        else:
+            # Pooled: (ΣSS_res) / ((N - P) * Σa²)
+            # Equivalent to the per-trace formula when both traces are identical.
+            chi2_values.append(sum_SS_res / ((N - P) * sum_a2))
+
+    return xr.DataArray(chi2_values, dims=["qubit"], coords={"qubit": ds_fit.qubit})
+
+
 def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
     """Add metadata to the dataset and fit results."""
     # Add calculated metadata to the dataset
@@ -100,8 +172,13 @@ def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
 
     freq_offset, decay, decay_error = calculate_fit_results(frequency, tau, tau_error, fit, detuning)
     # Assess whether the fit was successful or not
+    # Check 1: no NaN in fitted parameters
     nan_success = np.isnan(freq_offset.fit) | np.isnan(decay.fit)
-    success_criteria = ~nan_success
+    # Check 2: oscillation detected via residual chi-squared.
+    # chi2 = SS_res / ((N - 5) * a²); chi2 > 2 → no oscillation
+    chi2 = _compute_chi2(fit, node)
+    osc_detected = chi2 <= 2.0
+    success_criteria = ~nan_success & osc_detected
     fit = fit.assign({"success": success_criteria})
     # Populate the FitParameters class with fitted values
     fit_results = {
@@ -110,6 +187,7 @@ def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
             decay=float(decay.sel(qubit=q).fit),
             decay_error=float(decay_error.sel(qubit=q).fit),
             success=bool(fit.sel(qubit=q).success.values),
+            chi2=float(chi2.sel(qubit=q).item()),
         )
         for q in fit.qubit.values
     }

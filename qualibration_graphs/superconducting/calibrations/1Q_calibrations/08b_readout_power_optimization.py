@@ -20,7 +20,7 @@ from calibration_utils.readout_power_optimization import (
     log_fitted_results,
     plot_raw_data_with_fit,
 )
-from calibration_utils.iq_blobs.plotting import plot_iq_blobs, plot_confusion_matrices
+from calibration_utils.iq_blobs.plotting import plot_iq_blobs, plot_confusion_matrices, plot_historams
 from qualibration_libs.parameters import get_qubits
 from qualibration_libs.runtime import simulate_and_plot
 from qualibration_libs.data import XarrayDataFetcher
@@ -214,12 +214,14 @@ def plot_data(node: QualibrationNode[Parameters, Quam]):
     fig_confusion = plot_confusion_matrices(
         node.results["ds_raw"], node.namespace["qubits"], node.results["ds_iq_blobs"]
     )
+    fig_histogram = plot_historams(node.results["ds_raw"], node.namespace["qubits"], node.results["ds_iq_blobs"])
     plt.show()
     # Store the generated figures
     node.results["figures"] = {
         "amplitude": fig_raw_fit,
         "iq_blobs": fig_iq,
         "confusion_matrix": fig_confusion,
+        "histograms": fig_histogram,
     }
 
 

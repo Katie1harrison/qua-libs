@@ -59,9 +59,9 @@ def _ensure_temp_calibration_fields(machine, qubit_name: str) -> TemporaryCalibr
         'resonator_amplitudes': None,
         'parameters': None,
         'adaptive_frequency_span_mhz': None,
-        'adaptive_frequency_step_mhz': None,
         'adaptive_power_shift_dbm': None,
         'adaptive_num_shots': None,
+        'selected_power_dbm': None,
         'last_updated': None,
         'notes': None,
     }
@@ -100,13 +100,9 @@ State update:
       qubit.xy.f_01 & qubit.xy.RF_frequency
     - The selected spectroscopy drive power: qubit.xy.spectroscopy_power
     - Adaptive parameters in temp_calibration (when use_adaptive_span=True):
-      * On weak peak (first time): centers qubit frequency on peak, zooms in (span=50 MHz, step=0.1 MHz)
-      * On weak peak (already in zoom mode): accepts as successful, updates state with weak peak result
-      * On no peak: expands frequency span and increases power
-      * On success: resets all adaptive parameters
-      * adaptive_frequency_span_mhz: expands when no peak found; set to 50 MHz on first weak peak
-      * adaptive_frequency_step_mhz: set to 0.1 MHz on first weak peak (zoom mode flag)
-      * adaptive_power_shift_dbm: adjusts based on peak strength (no longer changed on weak peak)
+      * On no peak: expands frequency span AND increases power
+      * On success: resets all adaptive parameters (adaptive_frequency_span_mhz,
+        adaptive_power_shift_dbm, adaptive_num_shots)
 """
 
 
@@ -173,11 +169,6 @@ def create_qua_program(node: QualibrationNode[Parameters, Quam]):
             frequency_span_mhz = temp_data.adaptive_frequency_span_mhz
             node.log(
                 f"[{qubit.name}] Using adaptive frequency span: {frequency_span_mhz:.1f} MHz"
-            )
-        if temp_data.adaptive_frequency_step_mhz is not None:
-            frequency_step_mhz = temp_data.adaptive_frequency_step_mhz
-            node.log(
-                f"[{qubit.name}] Using adaptive frequency step: {frequency_step_mhz:.4f} MHz (zoom mode)"
             )
 
     span = frequency_span_mhz * u.MHz
@@ -365,7 +356,7 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
     POWER_INCREASE_DBM = 10.0    # Increase power when no/weak peak
     POWER_DECREASE_DBM = -10.0   # Decrease power when over-saturated
     MIN_POWER_DBM = -100.0       # Minimum allowed power
-    MAX_POWER_DBM = 20.0         # Maximum allowed power
+    MAX_POWER_DBM = 50.0         # Maximum allowed power
 
     with node.record_state_updates():
         for q in node.namespace["qubits"]:
@@ -386,9 +377,6 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
                 error_code = QubitSpectroscopyErrorCode(node.results["fit_results"][q.name].get("error_code", 0))
 
                 if node.parameters.use_adaptive_span:
-                    # Check if there's a weak peak at high power
-                    weak_peak_at_high_power = node.results["fit_results"][q.name].get("weak_peak_at_high_power", False)
-
                     # Get current adaptive parameters
                     current_span = node.parameters.frequency_span_in_mhz
                     if temp_data.adaptive_frequency_span_mhz is not None:
@@ -397,105 +385,35 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
                     # Get current power shift
                     current_power_shift = temp_data.adaptive_power_shift_dbm or 0.0
 
-                    if weak_peak_at_high_power:
-                        # Case 2: Weak peak detected.
-                        # First time: center on peak, zoom in (span=50 MHz, step=0.1 MHz).
-                        # Second time (already in zoom mode): accept as forced success.
-                        ZOOM_SPAN_MHZ = 50.0
-                        ZOOM_STEP_MHZ = 0.1
+                    # No peak at all → increase frequency span AND power
+                    new_span = min(current_span * FREQUENCY_SPAN_EXPANSION_FACTOR, MAX_FREQUENCY_SPAN_MHZ)
+                    new_power_shift = current_power_shift + POWER_INCREASE_DBM
 
-                        already_in_zoom_mode = temp_data.adaptive_frequency_step_mhz is not None
-                        weak_freq = node.results["fit_results"][q.name].get("weak_peak_frequency", np.nan)
-                        weak_power = node.results["fit_results"][q.name].get("weak_peak_power", np.nan)
-
-                        if already_in_zoom_mode:
-                            # Second weak peak in zoom mode → accept as successful attempt
-                            if np.isfinite(weak_freq):
-                                q.xy.RF_frequency = weak_freq
-                                q.f_01 = weak_freq
-                            # Use the detected weak peak power (or fall back to max power - buffer)
-                            best_power = (
-                                weak_power - node.parameters.power_buffer_db
-                                if np.isfinite(weak_power)
-                                else node.parameters.max_power_dbm + current_power_shift - node.parameters.power_buffer_db
-                            )
-                            new_power_settings = q.xy.set_output_power(
-                                power_in_dbm=best_power,
-                                max_amplitude=node.parameters.max_amplitude_opx,
-                                operation=node.parameters.operation,
-                            )
-                            if node.parameters.operation != "saturation":
-                                q.xy.set_output_power(
-                                    power_in_dbm=best_power,
-                                    max_amplitude=node.parameters.max_amplitude_opx,
-                                    operation="x180",
-                                )
-                            # Reset all adaptive parameters
-                            temp_data.adaptive_frequency_span_mhz = None
-                            temp_data.adaptive_frequency_step_mhz = None
-                            temp_data.adaptive_power_shift_dbm = None
-                            temp_data.adaptive_num_shots = None
-                            # Override outcome so the graph moves to the next node
-                            node.outcomes[q.name] = "successful"
-                            node.results["fit_results"][q.name]["corrective_action"] = int(QubitSpectroscopyCorrectiveAction.RESET_ADAPTIVE_PARAMS)
-                            node.results["fit_results"][q.name]["action_magnitude"] = 0.0
-                            node.log(
-                                f"[{q.name}] ERROR CODE: {error_code.name} ({error_code.value})\n"
-                                f"  CORRECTIVE ACTION: ACCEPT WEAK PEAK (zoom mode, second attempt)\n"
-                                f"  Accepting weak peak as successful attempt\n"
-                                f"  Qubit frequency:     {weak_freq / 1e9:.6f} GHz\n"
-                                f"  Drive power:         {best_power:.1f} dBm"
-                            )
-                        else:
-                            # First weak peak → center on it and zoom in; no power change
-                            if np.isfinite(weak_freq):
-                                q.xy.RF_frequency = weak_freq
-                                q.f_01 = weak_freq
-                                freq_update_msg = f"  Updated qubit freq: {weak_freq / 1e9:.6f} GHz"
-                            else:
-                                freq_update_msg = "  Frequency update:   skipped (no valid weak peak frequency)"
-
-                            temp_data.adaptive_frequency_span_mhz = ZOOM_SPAN_MHZ
-                            temp_data.adaptive_frequency_step_mhz = ZOOM_STEP_MHZ
-                            node.results["fit_results"][q.name]["corrective_action"] = int(QubitSpectroscopyCorrectiveAction.ZOOM_IN_FREQUENCY_STEP)
-                            node.results["fit_results"][q.name]["action_magnitude"] = float(ZOOM_STEP_MHZ)
-                            node.log(
-                                f"[{q.name}] ERROR CODE: {error_code.name} ({error_code.value})\n"
-                                f"  CORRECTIVE ACTION: CENTER_ON_WEAK_PEAK + ZOOM_IN\n"
-                                f"{freq_update_msg}\n"
-                                f"  Zoom span:  {ZOOM_SPAN_MHZ:.0f} MHz\n"
-                                f"  Zoom step:  {ZOOM_STEP_MHZ:.3f} MHz"
-                            )
+                    # Update frequency span
+                    if new_span < MAX_FREQUENCY_SPAN_MHZ:
+                        temp_data.adaptive_frequency_span_mhz = new_span
+                        span_msg = f"  Current span: {current_span:.1f} MHz\n  New span:     {new_span:.1f} MHz"
                     else:
-                        # Case 1: No peak at all → increase frequency span AND power
-                        new_span = min(current_span * FREQUENCY_SPAN_EXPANSION_FACTOR, MAX_FREQUENCY_SPAN_MHZ)
-                        new_power_shift = current_power_shift + POWER_INCREASE_DBM
+                        span_msg = f"  Frequency span: {MAX_FREQUENCY_SPAN_MHZ:.1f} MHz (max reached)"
 
-                        # Update frequency span
-                        if new_span < MAX_FREQUENCY_SPAN_MHZ:
-                            temp_data.adaptive_frequency_span_mhz = new_span
-                            span_msg = f"  Current span: {current_span:.1f} MHz\n  New span:     {new_span:.1f} MHz"
-                        else:
-                            span_msg = f"  Frequency span: {MAX_FREQUENCY_SPAN_MHZ:.1f} MHz (max reached)"
+                    # Update power shift
+                    if node.parameters.max_power_dbm + new_power_shift <= MAX_POWER_DBM:
+                        temp_data.adaptive_power_shift_dbm = new_power_shift
+                        power_msg = f"  Current power shift: {current_power_shift:.1f} dBm\n  New power shift:     {new_power_shift:.1f} dBm"
+                    else:
+                        power_msg = f"  Power shift: {current_power_shift:.1f} dBm (max reached)"
 
-                        # Update power shift
-                        if node.parameters.max_power_dbm + new_power_shift <= MAX_POWER_DBM:
-                            temp_data.adaptive_power_shift_dbm = new_power_shift
-                            power_msg = f"  Current power shift: {current_power_shift:.1f} dBm\n  New power shift:     {new_power_shift:.1f} dBm"
-                        else:
-                            power_msg = f"  Power shift: {current_power_shift:.1f} dBm (max reached)"
+                    # Update fit results with corrective actions
+                    expansion_percent = int((FREQUENCY_SPAN_EXPANSION_FACTOR - 1) * 100)
+                    node.results["fit_results"][q.name]["corrective_action"] = int(QubitSpectroscopyCorrectiveAction.EXPAND_FREQUENCY_SPAN)
+                    node.results["fit_results"][q.name]["action_magnitude"] = float(expansion_percent)
 
-                        # Update fit results with corrective actions
-                        expansion_percent = int((FREQUENCY_SPAN_EXPANSION_FACTOR - 1) * 100)
-                        node.results["fit_results"][q.name]["corrective_action"] = int(QubitSpectroscopyCorrectiveAction.EXPAND_FREQUENCY_SPAN)
-                        node.results["fit_results"][q.name]["action_magnitude"] = float(expansion_percent)
-
-                        node.log(
-                            f"[{q.name}] ERROR CODE: {error_code.name} ({error_code.value})\n"
-                            f"  CORRECTIVE ACTION: EXPAND_FREQUENCY_SPAN + INCREASE_POWER\n"
-                            f"{span_msg}\n"
-                            f"{power_msg}"
-                        )
+                    node.log(
+                        f"[{q.name}] ERROR CODE: {error_code.name} ({error_code.value})\n"
+                        f"  CORRECTIVE ACTION: EXPAND_FREQUENCY_SPAN + INCREASE_POWER\n"
+                        f"{span_msg}\n"
+                        f"{power_msg}"
+                    )
                 else:
                     node.log(
                         f"[{q.name}] ERROR CODE: {error_code.name} ({error_code.value})\n"
@@ -548,7 +466,6 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
             # -----------------------------
             # (fields already initialized at top of loop)
             temp_data.adaptive_frequency_span_mhz = None
-            temp_data.adaptive_frequency_step_mhz = None
             temp_data.adaptive_power_shift_dbm = None
             temp_data.adaptive_num_shots = None
 
@@ -560,6 +477,9 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
             # Selected power (dBm)
             # -----------------------------
             selected_power_dbm = node.results["fit_results"][q.name]["selected_power"]
+
+            # Save selected power to temp_calibration for downstream nodes
+            temp_data.selected_power_dbm = selected_power_dbm
 
             # -----------------------------
             # Selected qubit frequency (Hz)
@@ -575,12 +495,11 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
                 operation=node.parameters.operation,
             )
 
-            if node.parameters.operation != "saturation":
-                new_power_settings = q.xy.set_output_power(
-                    power_in_dbm=selected_power_dbm,
-                    max_amplitude=node.parameters.max_amplitude_opx,
-                    operation="x180",
-                )
+            q.xy.set_output_power(
+                power_in_dbm=selected_power_dbm,
+                max_amplitude=node.parameters.max_amplitude_opx,
+                operation="x180",
+            )
 
             # -----------------------------
             # Update qubit frequency
@@ -607,41 +526,4 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
 # %% {Save_results}
 @node.run_action()
 def save_results(node: QualibrationNode[Parameters, Quam]):
-    # Debug: Check state before saving
-    if node.machine.temp_calibration:
-        for qubit_name, temp_data in node.machine.temp_calibration.items():
-            if hasattr(temp_data, 'adaptive_power_shift_dbm'):
-                power_shift = temp_data.adaptive_power_shift_dbm
-                node.log(f"[DEBUG] Before save - {qubit_name}: adaptive_power_shift_dbm = {power_shift}")
-            else:
-                node.log(f"[DEBUG] Before save - {qubit_name}: adaptive_power_shift_dbm attribute missing!")
-
-    try:
-        node.save()
-    except Exception as e:
-        node.log(f"[ERROR] Save failed: {e}")
-        node.log("[INFO] This is likely due to incompatibility with old state.json format.")
-        node.log("[INFO] Attempting to rebuild temp_calibration dictionary...")
-
-        # Try to rebuild temp_calibration with fresh objects
-        if node.machine.temp_calibration:
-            new_temp_calibration = {}
-            for qubit_name, old_temp_data in node.machine.temp_calibration.items():
-                # Create a fresh TemporaryCalibrationData object
-                new_temp_data = TemporaryCalibrationData()
-
-                # Copy all values from old object to new object
-                for field in ['resonator_amplitudes', 'parameters', 'adaptive_frequency_span_mhz',
-                             'adaptive_frequency_step_mhz', 'adaptive_power_shift_dbm', 'adaptive_num_shots',
-                             'last_updated', 'notes']:
-                    if hasattr(old_temp_data, field):
-                        setattr(new_temp_data, field, getattr(old_temp_data, field))
-
-                new_temp_calibration[qubit_name] = new_temp_data
-
-            # Replace the entire temp_calibration dictionary
-            node.machine.temp_calibration = new_temp_calibration
-
-            node.log("[INFO] Rebuilt temp_calibration dictionary. Retrying save...")
-            node.save()
-            node.log("[INFO] Save successful after rebuilding!")
+    node.save()

@@ -6,13 +6,12 @@ import numpy as np
 import xarray as xr
 from qualibrate import QualibrationNode
 from qualibration_libs.analysis import fit_oscillation
-from qualibration_libs.data import add_amplitude_and_phase, convert_IQ_to_V
-from quam_config.instrument_limits import instrument_limits
+from qualibration_libs.data import convert_IQ_to_V
 from calibration_utils.error_codes import PowerRabiErrorCode, PowerRabiCorrectiveAction
 
 # Thresholds for period-count classification (in adaptive mode)
 _TOO_MANY_PERIODS_THRESHOLD = 2.0   # more than 2 full oscillations → base amp too high
-_TOO_FEW_PERIODS_THRESHOLD = 0.8    # less than 0.8 oscillations  → base amp too low
+_TOO_FEW_PERIODS_THRESHOLD = 0.5    # less than 0.5 oscillations  → base amp too low
 
 
 @dataclass
@@ -25,6 +24,8 @@ class FitParameters:
     success: bool
     num_periods: float = float("nan")
     """Number of Rabi oscillation periods detected across the amplitude sweep."""
+    chi2: float = float("nan")
+    """Residual chi-squared: SS_res / ((N-4)·a²); chi2 > 2 → NO_OSCILLATION."""
     error_code: int = int(PowerRabiErrorCode.SUCCESS)
     """PowerRabiErrorCode: classification of the calibration result."""
     corrective_action: int = int(PowerRabiCorrectiveAction.NONE)
@@ -57,6 +58,9 @@ def log_fitted_results(fit_results: Dict, log_callable=None):
         num_periods = fit_results[q].get("num_periods", float("nan"))
         if np.isfinite(num_periods):
             s_amp += f"Rabi periods in sweep: {num_periods:.2f}\n "
+        chi2_val = fit_results[q].get("chi2", float("nan"))
+        if np.isfinite(chi2_val):
+            s_amp += f"Residual chi2: {chi2_val:.3f}\n "
         error_code = fit_results[q].get("error_code", 0)
         if error_code != 0:
             s_amp += f"Error code: {PowerRabiErrorCode(error_code).name}\n "
@@ -70,8 +74,6 @@ def log_fitted_results(fit_results: Dict, log_callable=None):
 def process_raw_dataset(ds: xr.Dataset, node: QualibrationNode):
     if not node.parameters.use_state_discrimination:
         ds = convert_IQ_to_V(ds, node.namespace["qubits"])
-        # Add amplitude and phase for IQ_abs calculation
-        ds = add_amplitude_and_phase(ds, "amp_prefactor", subtract_slope_flag=True)
 
     if node.name == "13_power_rabi_ef":
         full_amp = np.array([ds.amp_prefactor * q.xy.operations["EF_x180"].amplitude for q in node.namespace["qubits"]])
@@ -109,8 +111,7 @@ def fit_raw_data(ds: xr.Dataset, node: QualibrationNode) -> Tuple[xr.Dataset, di
         if node.parameters.use_state_discrimination:
             fit_vals = fit_oscillation(ds_fit.state, "amp_prefactor")
         else:
-            # Always fit over IQ_abs (magnitude) instead of just I component
-            fit_vals = fit_oscillation(ds_fit.IQ_abs, "amp_prefactor")
+            fit_vals = fit_oscillation(ds_fit.I, "amp_prefactor")
 
         ds_fit = xr.merge([ds, fit_vals.rename("fit")])
     else:
@@ -119,8 +120,7 @@ def fit_raw_data(ds: xr.Dataset, node: QualibrationNode) -> Tuple[xr.Dataset, di
         if node.parameters.use_state_discrimination:
             ds_fit["data_mean"] = ds.state.mean(dim="nb_of_pulses")
         else:
-            # Use IQ_abs (magnitude) instead of just I component
-            ds_fit["data_mean"] = ds.IQ_abs.mean(dim="nb_of_pulses")
+            ds_fit["data_mean"] = ds.I.mean(dim="nb_of_pulses")
         if (ds.nb_of_pulses.data[0] % 2 == 0 and operation == "x180") or (
             ds.nb_of_pulses.data[0] % 2 != 0 and operation != "x180"
         ):
@@ -133,25 +133,55 @@ def fit_raw_data(ds: xr.Dataset, node: QualibrationNode) -> Tuple[xr.Dataset, di
     return fit_data, fit_results
 
 
+def _compute_chi2(fit: xr.Dataset) -> xr.DataArray:
+    """
+    Compute the residual chi-squared for each qubit's oscillation fit.
+
+        chi2 = SS_res / ((N - 4) * a_fit²)
+
+    where SS_res is the sum of squared residuals between I and the
+    reconstructed sinusoid, N is the number of sweep points, and a_fit is
+    the fitted oscillation amplitude.
+
+    Interpretation:
+        chi2 ≤ 2  →  oscillation detected (amplitude ≥ residual RMS / √2)
+        chi2 > 2  →  residuals dominate; no Rabi oscillation (NO_OSCILLATION)
+    """
+    from qualibration_libs.analysis import oscillation as _oscillation_fn
+
+    x = fit.amp_prefactor.values  # (N,)
+    N = len(x)
+    P = 4  # free parameters: a, f, phi, offset
+
+    chi2_values = []
+    for q in fit.qubit.values:
+        fit_q = fit.sel(qubit=q)
+
+        i_data = fit_q.I
+        if "nb_of_pulses" in i_data.dims:
+            i_data = i_data.sel(nb_of_pulses=1)
+        data = i_data.values  # (N,)
+
+        a = float(fit_q.fit.sel(fit_vals="a").item())
+        f = float(fit_q.fit.sel(fit_vals="f").item())
+        phi = float(fit_q.fit.sel(fit_vals="phi").item())
+        offset = float(fit_q.fit.sel(fit_vals="offset").item())
+
+        if not np.isfinite(a) or a <= 0.0 or N <= P:
+            chi2_values.append(float("inf"))
+            continue
+
+        fitted = _oscillation_fn(x, a, f, phi, offset)
+        SS_res = float(np.sum((data - fitted) ** 2))
+        chi2_values.append(SS_res / ((N - P) * a ** 2))
+
+    return xr.DataArray(chi2_values, dims=["qubit"], coords={"qubit": fit.qubit})
+
+
 def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
     """Add metadata to the dataset and fit results."""
-    limits = [instrument_limits(q.xy) for q in node.namespace["qubits"]]
     max_pulses = getattr(node.parameters, "max_number_pulses_per_sweep", 1)
     operation = getattr(node.parameters, "operation", "EF_x180" if node.name == "13_power_rabi_ef" else "x180")
-
-    # Get resonator amplitude range for each qubit
-    qubit_names = fit.qubit.values
-    min_resonator_amp = xr.DataArray(
-        [node.machine.temp_calibration[q].resonator_amplitudes["min_amplitude"] for q in qubit_names],
-        dims=["qubit"],
-        coords={"qubit": qubit_names},
-    )
-    max_resonator_amp = xr.DataArray(
-        [node.machine.temp_calibration[q].resonator_amplitudes["max_amplitude"] for q in qubit_names],
-        dims=["qubit"],
-        coords={"qubit": qubit_names},
-    )
-    expected_max_rabi_amp = (max_resonator_amp - min_resonator_amp) / 2
 
     if max_pulses == 1:
         # Process the fit parameters to get the right amplitude
@@ -216,20 +246,20 @@ def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
     # Check 1: No NaN values in fitted parameters
     nan_success = np.isnan(fit.opt_amp_prefactor) | np.isnan(fit.opt_amp)
 
-    # Check 2: Amplitude within instrument limits
-    amp_success = fit.opt_amp < limits[0].max_x180_wf_amplitude
-
-    # Check 3: Rabi oscillation amplitude is at least 20% of expected maximum
-    # (based on resonator amplitude range from previous calibrations)
+    # Check 2: Rabi oscillation detected via residual chi-squared.
+    # chi2 = SS_res / ((N - 4) * a²); chi2 > 2 → NO_OSCILLATION
     if max_pulses == 1:
-        rabi_amplitude = fit.fit.sel(fit_vals="a")  # Fitted oscillation amplitude
-        min_expected_rabi_amp = 0.2 * expected_max_rabi_amp
-        rabi_amp_sufficient = rabi_amplitude >= min_expected_rabi_amp
+        chi2 = _compute_chi2(fit)
+        rabi_amp_sufficient = chi2 <= 2.0
     else:
-        # For multiple pulses, we don't have the oscillation fit, so skip this check
+        # Multi-pulse sweep: chi2 not applicable, skip check
+        chi2 = xr.DataArray(
+            [float("nan")] * len(fit.qubit.values),
+            dims=["qubit"], coords={"qubit": fit.qubit},
+        )
         rabi_amp_sufficient = True
 
-    success_criteria = ~nan_success & amp_success & rabi_amp_sufficient
+    success_criteria = ~nan_success & rabi_amp_sufficient
     fit = fit.assign({"success": success_criteria})
 
     # Compute number of Rabi periods per qubit (only possible for single-pulse sweep)
@@ -248,14 +278,10 @@ def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
         if max_pulses == 1:
             freq_q = float(fit.sel(qubit=q).fit.sel(fit_vals="f").item())
             num_periods = abs(freq_q) * sweep_range
-            q_rabi_sufficient = bool(rabi_amp_sufficient.sel(qubit=q).item())
+            q_chi2 = float(chi2.sel(qubit=q).item())
 
             if not q_success:
-                if not q_rabi_sufficient:
-                    error_code = PowerRabiErrorCode.NO_OSCILLATION
-                else:
-                    # NaN or amplitude limit exceeded – treat as no useful oscillation
-                    error_code = PowerRabiErrorCode.NO_OSCILLATION
+                error_code = PowerRabiErrorCode.NO_OSCILLATION
             elif num_periods > _TOO_MANY_PERIODS_THRESHOLD:
                 error_code = PowerRabiErrorCode.TOO_MANY_PERIODS
             elif num_periods < _TOO_FEW_PERIODS_THRESHOLD:
@@ -265,6 +291,7 @@ def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
         else:
             # With error amplification we cannot count periods from a single-pulse fit
             num_periods = float("nan")
+            q_chi2 = float("nan")
             error_code = PowerRabiErrorCode.SUCCESS if q_success else PowerRabiErrorCode.NO_OSCILLATION
 
         fit_results[q] = FitParameters(
@@ -273,6 +300,7 @@ def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
             operation=operation,
             success=q_success,
             num_periods=num_periods,
+            chi2=q_chi2,
             error_code=int(error_code),
             corrective_action=int(PowerRabiCorrectiveAction.NONE),
             action_magnitude=0.0,

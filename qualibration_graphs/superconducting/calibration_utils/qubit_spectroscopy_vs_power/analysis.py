@@ -15,17 +15,11 @@ def process_raw_dataset(ds: xr.Dataset, node: QualibrationNode) -> xr.Dataset:
     """
     Process raw qubit spectroscopy vs power dataset:
       - Convert I/Q to Volts
-      - Compute |IQ| and phase (NO normalization)
       - Add full RF frequency coordinate
     """
 
     ds = convert_IQ_to_V(ds, node.namespace["qubits"])
-
-    ds = add_amplitude_and_phase(
-        ds,
-        dim="detuning",
-        subtract_slope_flag=True,
-    )
+    ds = add_amplitude_and_phase(ds, "detuning", subtract_slope_flag=True)
 
     full_freq = np.array(
         [ds.detuning + q.xy.RF_frequency for q in node.namespace["qubits"]]
@@ -57,24 +51,51 @@ def _peak_index(iq_abs, baseline, min_height):
 
 
 def _compute_fwhm_around_peak(detuning, signal, peak_idx) -> float:
+    """
+    Compute FWHM of the peak at peak_idx using linear interpolation at the
+    half-max crossings, giving sub-step accuracy even on coarse sweeps.
+    """
     if peak_idx < 0:
         return np.nan
 
-    x = np.asarray(detuning)
-    y = np.asarray(signal)
+    x = np.asarray(detuning, dtype=float)
+    y = np.asarray(signal, dtype=float)
 
     if np.all(np.isnan(y)):
         return np.nan
 
     y = y - np.nanmin(y)
-    half_max = 0.5 * np.nanmax(y)
+    half_max = 0.5 * float(np.nanmax(y))
 
     above = y >= half_max
     if not np.any(above):
         return np.nan
 
     idx = np.where(above)[0]
-    return x[idx[-1]] - x[idx[0]]
+    left_i = int(idx[0])
+    right_i = int(idx[-1])
+
+    # Interpolate left crossing between (left_i - 1) and left_i
+    if left_i > 0 and not above[left_i - 1]:
+        dy = y[left_i] - y[left_i - 1]
+        left_x = (
+            x[left_i - 1] + (half_max - y[left_i - 1]) / dy * (x[left_i] - x[left_i - 1])
+            if dy > 0 else x[left_i]
+        )
+    else:
+        left_x = x[left_i]  # peak extends to sweep edge
+
+    # Interpolate right crossing between right_i and (right_i + 1)
+    if right_i < len(x) - 1 and not above[right_i + 1]:
+        dy = y[right_i + 1] - y[right_i]
+        right_x = (
+            x[right_i] + (half_max - y[right_i]) / dy * (x[right_i + 1] - x[right_i])
+            if dy < 0 else x[right_i]
+        )
+    else:
+        right_x = x[right_i]  # peak extends to sweep edge
+
+    return right_x - left_x
 
 
 def _check_high_baseline(signal, min_peak_height, linewidth_threshold_hz, detuning_step) -> bool:
@@ -116,41 +137,55 @@ def _check_high_baseline(signal, min_peak_height, linewidth_threshold_hz, detuni
     return bool(max_interval_hz > 10 * linewidth_threshold_hz)
 
 
-def _mask_blacklisted_detunings(ds: xr.Dataset, machine, tolerance_hz: float = 5e6) -> xr.Dataset:
+def _mask_blacklisted_detunings(
+    ds: xr.Dataset,
+    machine,
+    freq_tolerance_hz: float = 5e6,
+    power_tolerance_dbm: float = 3.0,
+) -> xr.Dataset:
     """
-    Set IQ_abs to NaN at detuning points within ±tolerance_hz of any blacklisted
-    qubit frequency. Applied per-qubit using the full_freq coordinate.
+    Set IQ_abs to NaN at 2-D (frequency, power) regions near any blacklisted
+    (qubit_freq_hz, drive_power_dbm) pair. The exclusion zone is:
 
-    This prevents blacklisted frequencies (e.g. those that yielded no Rabi oscillations
-    in a previous attempt) from appearing as candidate peaks in subsequent retries.
+        |freq  - bl_freq|  ≤ freq_tolerance_hz   AND
+        |power - bl_power| ≤ power_tolerance_dbm
+
+    This lets a subsequent spectroscopy run detect the same qubit transition at a
+    *different* drive power, rather than discarding the frequency column entirely.
     """
     if machine is None or not hasattr(machine, "temp_calibration") or machine.temp_calibration is None:
         return ds
 
     iq_masked = ds.IQ_abs.copy()
+    power_vals = ds.power.values  # shape: (n_power,)
 
     for qubit_name in ds.qubit.values:
         try:
-            bl_freqs = machine.temp_calibration[qubit_name].blacklisted_qubit_frequencies
+            bl_points = machine.temp_calibration[qubit_name].blacklisted_qubit_points
         except (KeyError, TypeError, AttributeError):
-            bl_freqs = None
+            bl_points = None
 
-        if not bl_freqs:
+        if not bl_points:
             continue
 
         # full_freq has dims (qubit, detuning) – absolute RF frequency in Hz
         full_freq_q = ds.full_freq.sel(qubit=qubit_name).values  # shape: (n_detuning,)
 
-        blacklisted = np.zeros(len(full_freq_q), dtype=bool)
-        for bl_freq in bl_freqs:
-            blacklisted |= np.abs(full_freq_q - bl_freq) <= tolerance_hz
+        for bl_freq, bl_power in bl_points:
+            freq_mask = np.abs(full_freq_q - bl_freq) <= freq_tolerance_hz   # (n_detuning,)
+            power_mask = np.abs(power_vals - bl_power) <= power_tolerance_dbm  # (n_power,)
 
-        if not np.any(blacklisted):
-            continue
+            if not np.any(freq_mask) or not np.any(power_mask):
+                continue
 
-        # Zero out the blacklisted detuning points for this qubit across all powers
-        keep = xr.DataArray(~blacklisted, dims=["detuning"], coords={"detuning": ds.detuning})
-        iq_masked.loc[dict(qubit=qubit_name)] = iq_masked.sel(qubit=qubit_name).where(keep)
+            # Outer product → True where BOTH conditions hold: shape (n_power, n_detuning)
+            to_null = np.outer(power_mask, freq_mask)
+            keep = xr.DataArray(
+                ~to_null,
+                dims=["power", "detuning"],
+                coords={"power": ds.power, "detuning": ds.detuning},
+            )
+            iq_masked.loc[dict(qubit=qubit_name)] = iq_masked.sel(qubit=qubit_name).where(keep)
 
     return ds.assign(IQ_abs=iq_masked)
 
@@ -164,7 +199,7 @@ def _get_resonator_amplitude(machine, qubit_name: str, key: str, data: xr.Datase
     try:
         return machine.temp_calibration[qubit_name].resonator_amplitudes[key]
     except (KeyError, TypeError, AttributeError):
-        # Fallback: use statistics from current data
+        # Fallback: use statistics from current data (fallback: IQ_abs.min/max)
         qubit_data = data.sel(qubit=qubit_name).IQ_abs
         if key == "min_amplitude":
             return float(qubit_data.min())
@@ -190,19 +225,30 @@ def fit_raw_data(
 
     qubit_names = ds.qubit.values
 
-    baseline_iq_abs_v = xr.DataArray(
+    # Current-data statistics: adaptive to the actual signal scale in this sweep.
+    baseline_iq_abs_v = ds.IQ_abs.min(dim=["power", "detuning"])
+    max_iq_abs_v = ds.IQ_abs.max(dim=["power", "detuning"])
+    data_range_v = max_iq_abs_v - baseline_iq_abs_v
+
+    # Resonator-amplitude-based range: the expected IQ dynamic range of the readout
+    # system, calibrated during resonator spectroscopy.  Falls back to data statistics
+    # if resonator calibration has not been run yet.
+    resonator_baseline_v = xr.DataArray(
         [_get_resonator_amplitude(machine, q, "min_amplitude", ds) for q in qubit_names],
-        dims=["qubit"],
-        coords={"qubit": qubit_names},
+        dims=["qubit"], coords={"qubit": qubit_names},
     )
-
-    max_iq_abs_v = xr.DataArray(
+    resonator_max_v = xr.DataArray(
         [_get_resonator_amplitude(machine, q, "max_amplitude", ds) for q in qubit_names],
-        dims=["qubit"],
-        coords={"qubit": qubit_names},
+        dims=["qubit"], coords={"qubit": qubit_names},
     )
+    resonator_range_v = resonator_max_v - resonator_baseline_v
 
-    min_peak_height = p.min_peak_fraction * (max_iq_abs_v - baseline_iq_abs_v)
+    # Use the more stringent (larger) range as the height reference so that a peak
+    # must be a meaningful fraction of the full IQ dynamic range, not just a fraction
+    # of whatever happened to appear in a low-SNR sweep.
+    height_range_v = xr.where(data_range_v >= resonator_range_v, data_range_v, resonator_range_v)
+
+    min_peak_height = p.min_peak_fraction * height_range_v
 
     peak_index = xr.apply_ufunc(
         _peak_index,
@@ -236,18 +282,35 @@ def fit_raw_data(
 
     valid_power = (
         (ds.peak_index >= 0)
-        & (ds.linewidth < p.linewidth_threshold_hz)
+        & (ds.linewidth <= p.linewidth_threshold_hz)
     )
 
+    # Primary: among powers where peak found AND linewidth ≤ threshold, select
+    # the one with maximum linewidth (highest power before over-saturation).
+    # idxmax returns the power coordinate value at the maximum, NaN if all are NaN.
+    primary_selected = (
+        ds.linewidth.where(valid_power)
+        .idxmax(dim="power", skipna=True)
+    )
+
+    # Fallback: if the linewidth threshold is never met (e.g. all detected peaks
+    # are power-broadened), fall back to the power with the narrowest detected
+    # linewidth regardless of the threshold.  This is flagged as OVER_SATURATED_SUCCESS.
+    fallback_selected = (
+        ds.linewidth.where(ds.peak_index >= 0)
+        .idxmin(dim="power", skipna=True)
+    )
+
+    used_fallback = ~np.isfinite(primary_selected)
     selected_power = (
-        ds.power.where(valid_power)
-        .max(dim="power")
+        primary_selected.where(~used_fallback, other=fallback_selected)
         - p.power_buffer_db
     )
 
     ds["selected_power"] = selected_power
+    ds["used_fallback_power"] = used_fallback
 
-    def _peak_frequency(full_freq, iq_abs, power, target_power):
+    def _peak_frequency(full_freq, i_data, power, target_power):
         if np.isnan(target_power):
             return np.nan
 
@@ -256,7 +319,7 @@ def fit_raw_data(
             return np.nan
 
         idx = int(np.nanargmin(diff))
-        spectrum = iq_abs[idx]
+        spectrum = i_data[idx]
 
         if np.all(np.isnan(spectrum)):
             return np.nan
@@ -294,17 +357,22 @@ def fit_raw_data(
             qubit_data.linewidth.values >= p.linewidth_threshold_hz
         ) or np.all(np.isnan(qubit_data.linewidth.values)))
 
-        # Check high baseline condition for all power points
-        baseline_iq_abs = _get_resonator_amplitude(machine, q, "min_amplitude", ds)
-        max_iq_abs = _get_resonator_amplitude(machine, q, "max_amplitude", ds)
-        expected_peak_height = p.min_peak_fraction * (max_iq_abs - baseline_iq_abs)
+        # Compute height reference: max of data-derived range and resonator-amplitude range.
+        baseline_iq_abs = float(qubit_data.IQ_abs.min())
+        max_iq_abs = float(qubit_data.IQ_abs.max())
+        data_range = max_iq_abs - baseline_iq_abs
+        resonator_range = (
+            _get_resonator_amplitude(machine, q, "max_amplitude", ds)
+            - _get_resonator_amplitude(machine, q, "min_amplitude", ds)
+        )
+        height_range = max(data_range, resonator_range)
 
         high_baseline_checks = []
         for power_idx in range(len(qubit_data.power)):
             signal = qubit_data.IQ_abs.isel(power=power_idx).values
             is_high_baseline = _check_high_baseline(
                 signal,
-                (max_iq_abs - baseline_iq_abs),
+                height_range,
                 p.linewidth_threshold_hz,
                 detuning_step
             )
@@ -316,46 +384,20 @@ def fit_raw_data(
         # over_saturated = bool(all_linewidths_large or all_high_baseline)
         over_saturated = bool(all_high_baseline)
 
-        # Check for weak peak at high power (only if calibration failed)
-        weak_peak_at_high_power = False
-        weak_peak_frequency = np.nan
-        weak_peak_power = np.nan
-        if not (np.isfinite(qubit_data.selected_power) and np.isfinite(qubit_data.rough_qubit_frequency)):
-            # Calibration failed, check if there's a weak peak at high power
-            # Look at the highest 3 power points
-            num_powers = len(qubit_data.power)
-            high_power_indices = range(max(0, num_powers - 3), num_powers)
-
-            # Weak peak is confirmed only if ALL three highest power points show a peak
-            # above 50% of the expected height simultaneously (AND condition).
-            all_weak = all(
-                np.nanmax(qubit_data.IQ_abs.isel(power=pi).values) - baseline_iq_abs
-                >= 0.8 * expected_peak_height
-                for pi in high_power_indices
-            )
-            if all_weak:
-                weak_peak_at_high_power = True
-                # Report peak location from the highest power point (last index)
-                signal = qubit_data.IQ_abs.isel(power=high_power_indices[-1]).values
-                peak_idx = int(np.nanargmax(signal))
-                # full_freq only has dimensions (qubit, detuning), not power
-                weak_peak_frequency = float(qubit_data.full_freq.isel(detuning=peak_idx).values)
-                weak_peak_power = float(qubit_data.power.isel(power=high_power_indices[-1]).values)
-
         # Determine error code based on detected conditions
         success = bool(
             np.isfinite(qubit_data.selected_power)
             and np.isfinite(qubit_data.rough_qubit_frequency)
         )
 
-        if success and over_saturated:
+        used_fallback_q = bool(ds["used_fallback_power"].sel(qubit=q).item())
+
+        if success and (over_saturated or used_fallback_q):
             error_code = QubitSpectroscopyErrorCode.OVER_SATURATED_SUCCESS
         elif success:
             error_code = QubitSpectroscopyErrorCode.SUCCESS
         elif over_saturated:
             error_code = QubitSpectroscopyErrorCode.OVER_SATURATED
-        elif weak_peak_at_high_power:
-            error_code = QubitSpectroscopyErrorCode.WEAK_PEAK_HIGH_POWER
         else:
             error_code = QubitSpectroscopyErrorCode.NO_PEAK_FOUND
 
@@ -365,9 +407,6 @@ def fit_raw_data(
             linewidth=qubit_data.linewidth.min(dim="power").values.__float__(),
             success=success,
             over_saturated=over_saturated,
-            weak_peak_at_high_power=weak_peak_at_high_power,
-            weak_peak_frequency=weak_peak_frequency,
-            weak_peak_power=weak_peak_power,
             error_code=int(error_code),
         )
 
@@ -396,24 +435,10 @@ def log_fitted_results(fit_results: Dict[str, Dict], log_callable=None):
                 f"  Min linewidth: {result['linewidth'] / 1e6:.2f} MHz"
             )
         else:
-            if weak_peak_at_high_power:
-                weak_freq = result.get('weak_peak_frequency', np.nan)
-                if np.isfinite(weak_freq):
-                    log_callable(
-                        f"[{qubit_name}] FAILED - Error code: {error_code.name} ({error_code.value})\n"
-                        f"  Weak peak detected at high power\n"
-                        f"  Weak peak frequency: {weak_freq / 1e9:.6f} GHz"
-                    )
-                else:
-                    log_callable(
-                        f"[{qubit_name}] FAILED - Error code: {error_code.name} ({error_code.value})\n"
-                        f"  Weak peak detected at high power"
-                    )
-            else:
-                log_callable(
-                    f"[{qubit_name}] FAILED - Error code: {error_code.name} ({error_code.value})\n"
-                    f"  No valid peak found"
-                )
+            log_callable(
+                f"[{qubit_name}] FAILED - Error code: {error_code.name} ({error_code.value})\n"
+                f"  No valid peak found"
+            )
 
 
 # ----------------------------------------------------------------------
@@ -429,9 +454,6 @@ class FitParameters:
     linewidth: float
     success: bool
     over_saturated: bool = False  # True if all power points show over-saturation
-    weak_peak_at_high_power: bool = False  # True if weak peak appears only at high power
-    weak_peak_frequency: float = np.nan  # Frequency of the weak peak (if detected)
-    weak_peak_power: float = np.nan  # Drive power at which the weak peak was detected (dBm)
     error_code: int = QubitSpectroscopyErrorCode.SUCCESS  # Error diagnostic code
     corrective_action: int = QubitSpectroscopyCorrectiveAction.NONE  # Corrective action code
     action_magnitude: float = 0.0  # Magnitude of the corrective action

@@ -252,11 +252,21 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
 
     In adaptive mode (use_adaptive=True):
     - NO_OSCILLATION: adds the qubit's RF frequency to the blacklist in temp_calibration.
-    - TOO_MANY_PERIODS: scales the base amplitude down (new = old / num_periods) so the next
-      run shows ~1 Rabi oscillation period across the amplitude sweep.
-    - TOO_FEW_PERIODS: scales the base amplitude up by the same formula.
-    - SUCCESS: behaves like normal (updates to the fitted optimal amplitude).
+      If duration adaptation was active, restores the original pulse length.
+    - TOO_MANY_PERIODS: scales the base amplitude down (new = old / num_periods).
+    - TOO_FEW_PERIODS: scales the base amplitude up if there is headroom; once the
+      amplitude sweep already reaches the hardware limit AND the Octave gain is at
+      maximum (20 dB), switches to increasing the pulse duration instead
+      (num_periods ∝ duration → new_len = old_len / num_periods).
+    - SUCCESS: updates to the fitted optimal amplitude; if duration adaptation was
+      active, keeps the adapted length and clears the temp fields.
     """
+    # Maximum Octave upconversion gain (dB).  At this value the RF chain is
+    # fully open and further power can only be gained by increasing pulse duration.
+    _MAX_OCTAVE_GAIN_DB = 20.0
+    # Minimum allowed pulse length (must be a multiple of 4 ns for QUA).
+    _MIN_PULSE_LENGTH_NS = 16
+
     def _ensure_temp_calibration(machine, qubit_name: str):
         """Return the TemporaryCalibrationData for qubit_name, creating it if absent."""
         from quam_config.my_quam import TemporaryCalibrationData
@@ -265,9 +275,10 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
         if qubit_name not in machine.temp_calibration:
             machine.temp_calibration[qubit_name] = TemporaryCalibrationData()
         temp_data = machine.temp_calibration[qubit_name]
-        # Backward-compatibility: add field if an older state.json omitted it
-        if not hasattr(temp_data, "blacklisted_qubit_frequencies"):
-            object.__setattr__(temp_data, "blacklisted_qubit_frequencies", None)
+        # Backward-compatibility: add fields if an older state.json omitted them
+        for field in ("blacklisted_qubit_points", "adaptive_x180_length_ns", "initial_x180_length_ns"):
+            if not hasattr(temp_data, field):
+                object.__setattr__(temp_data, field, None)
         return temp_data
 
     def _get_rf_frequency(qubit) -> float:
@@ -277,66 +288,142 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
         except AttributeError:
             return float(qubit.xy.intermediate_frequency)
 
+    def _get_octave_gain(qubit) -> float:
+        """Return the Octave upconversion gain in dB, or -inf if not applicable."""
+        try:
+            return float(qubit.xy.frequency_converter_up.gain)
+        except AttributeError:
+            return float("-inf")
+
     with node.record_state_updates():
         for q in node.namespace["qubits"]:
             fit_result = node.results["fit_results"][q.name]
             error_code = PowerRabiErrorCode(
                 fit_result.get("error_code", int(PowerRabiErrorCode.SUCCESS))
             )
+            operation = q.xy.operations[node.parameters.operation]
+            limits = instrument_limits(q.xy)
 
             # ── Failed calibration ──────────────────────────────────────────────
             if node.outcomes[q.name] == "failed":
                 if node.parameters.use_adaptive and error_code == PowerRabiErrorCode.NO_OSCILLATION:
-                    # Blacklist the current qubit frequency so upstream nodes can avoid it
                     temp_data = _ensure_temp_calibration(node.machine, q.name)
+
+                    # Restore original pulse length if duration adaptation was active
+                    if temp_data.initial_x180_length_ns is not None:
+                        original_len = int(temp_data.initial_x180_length_ns)
+                        operation.length = original_len
+                        if node.parameters.operation == "x180":
+                            try:
+                                q.xy.operations["x90"].length = original_len
+                            except ValueError:
+                                pass  # x90.length is a reference to x180.length; updates automatically
+                        temp_data.adaptive_x180_length_ns = None
+                        temp_data.initial_x180_length_ns = None
+                        node.log(
+                            f"[Adaptive] {q.name}: No oscillation after duration adaptation. "
+                            f"Restored original pulse length: {original_len} ns."
+                        )
+
+                    # Blacklist the (qubit frequency, drive power) pair so upstream
+                    # nodes can avoid this specific 2D point in future spectroscopy runs.
                     rf_freq = _get_rf_frequency(q)
-                    if temp_data.blacklisted_qubit_frequencies is None:
-                        temp_data.blacklisted_qubit_frequencies = []
-                    if rf_freq not in temp_data.blacklisted_qubit_frequencies:
-                        temp_data.blacklisted_qubit_frequencies.append(rf_freq)
+                    power_dbm = q.xy.get_output_power("saturation")
+                    if temp_data.blacklisted_qubit_points is None:
+                        temp_data.blacklisted_qubit_points = []
+                    if [rf_freq, power_dbm] not in temp_data.blacklisted_qubit_points:
+                        temp_data.blacklisted_qubit_points.append([rf_freq, power_dbm])
                     fit_result["corrective_action"] = int(PowerRabiCorrectiveAction.BLACKLIST_FREQUENCY)
                     fit_result["action_magnitude"] = rf_freq
                     node.log(
                         f"[Adaptive] {q.name}: No oscillation detected. "
-                        f"Blacklisted RF frequency {rf_freq / 1e9:.6f} GHz."
+                        f"Blacklisted RF frequency {rf_freq / 1e9:.6f} GHz "
+                        f"at drive power {power_dbm:.1f} dBm."
                     )
                 continue
 
-            operation = q.xy.operations[node.parameters.operation]
-            limits = instrument_limits(q.xy)
-
-            # ── Adaptive: rescale base amplitude if period count is off ─────────
+            # ── Adaptive: rescale if period count is off ─────────────────────────
             if node.parameters.use_adaptive and error_code in (
                 PowerRabiErrorCode.TOO_MANY_PERIODS,
                 PowerRabiErrorCode.TOO_FEW_PERIODS,
             ):
                 num_periods = fit_result.get("num_periods", 1.0)
                 if num_periods > 0 and np.isfinite(num_periods):
-                    # Scale amplitude so the next run shows ~1 period:
-                    # Rabi frequency ∝ amplitude  →  new_amp = old_amp / num_periods
                     current_amp = operation.amplitude
-                    new_amp = float(
-                        np.clip(current_amp / num_periods, 0.0, limits.max_x180_wf_amplitude)
-                    )
-                    operation.amplitude = new_amp
-                    if node.parameters.operation == "x180":
-                        q.xy.operations["x90"].amplitude = new_amp / 2
 
-                    corrective_action = (
-                        PowerRabiCorrectiveAction.REDUCE_AMPLITUDE
-                        if error_code == PowerRabiErrorCode.TOO_MANY_PERIODS
-                        else PowerRabiCorrectiveAction.INCREASE_AMPLITUDE
-                    )
-                    fit_result["corrective_action"] = int(corrective_action)
-                    fit_result["action_magnitude"] = new_amp
-                    node.log(
-                        f"[Adaptive] {q.name}: {error_code.name} "
-                        f"({num_periods:.2f} periods). "
-                        f"Rescaling {node.parameters.operation} amplitude: "
-                        f"{1e3 * current_amp:.2f} mV → {1e3 * new_amp:.2f} mV."
-                    )
+                    # ── TOO_FEW_PERIODS: try amplitude first; fall back to duration
+                    # when the sweep already saturates the hardware limit and the
+                    # Octave gain is at its maximum.
+                    if error_code == PowerRabiErrorCode.TOO_FEW_PERIODS:
+                        amplitude_maxed = (
+                            current_amp * node.parameters.max_amp_factor
+                            >= limits.max_x180_wf_amplitude
+                        )
+                        gain_maxed = _get_octave_gain(q) >= _MAX_OCTAVE_GAIN_DB
+
+                        if amplitude_maxed and gain_maxed:
+                            # Switch to duration adaptation.
+                            # num_periods ∝ duration → new_len = old_len / num_periods
+                            temp_data = _ensure_temp_calibration(node.machine, q.name)
+
+                            # Save original length on the first duration-adaptation step
+                            if temp_data.initial_x180_length_ns is None:
+                                temp_data.initial_x180_length_ns = float(operation.length)
+
+                            current_len = float(operation.length)
+                            # Round to a multiple of 4 ns (one QUA clock cycle)
+                            new_len = int(round(current_len / num_periods / 4) * 4)
+                            new_len = max(new_len, _MIN_PULSE_LENGTH_NS)
+                            operation.length = new_len
+                            if node.parameters.operation == "x180":
+                                try:
+                                    q.xy.operations["x90"].length = new_len
+                                except ValueError:
+                                    pass  # x90.length is a reference to x180.length; updates automatically
+
+                            temp_data.adaptive_x180_length_ns = float(new_len)
+                            fit_result["corrective_action"] = int(PowerRabiCorrectiveAction.INCREASE_DURATION)
+                            fit_result["action_magnitude"] = float(new_len)
+                            node.log(
+                                f"[Adaptive] {q.name}: TOO_FEW_PERIODS ({num_periods:.2f} periods). "
+                                f"Amplitude maxed ({current_amp * node.parameters.max_amp_factor:.4f} V "
+                                f">= {limits.max_x180_wf_amplitude:.3f} V) and Octave gain maxed "
+                                f"({_get_octave_gain(q):.0f} dB). "
+                                f"Increasing pulse duration: {current_len:.0f} ns → {new_len} ns."
+                            )
+                        else:
+                            # Amplitude headroom remains – scale amplitude up
+                            new_amp = float(
+                                np.clip(current_amp / num_periods, 0.0, limits.max_x180_wf_amplitude)
+                            )
+                            operation.amplitude = new_amp
+                            if node.parameters.operation == "x180":
+                                q.xy.operations["x90"].amplitude = new_amp / 2
+                            fit_result["corrective_action"] = int(PowerRabiCorrectiveAction.INCREASE_AMPLITUDE)
+                            fit_result["action_magnitude"] = new_amp
+                            node.log(
+                                f"[Adaptive] {q.name}: TOO_FEW_PERIODS ({num_periods:.2f} periods). "
+                                f"Rescaling {node.parameters.operation} amplitude: "
+                                f"{1e3 * current_amp:.2f} mV → {1e3 * new_amp:.2f} mV."
+                            )
+
+                    # ── TOO_MANY_PERIODS: always scale amplitude down
+                    else:
+                        new_amp = float(
+                            np.clip(current_amp / num_periods, 0.0, limits.max_x180_wf_amplitude)
+                        )
+                        operation.amplitude = new_amp
+                        if node.parameters.operation == "x180":
+                            q.xy.operations["x90"].amplitude = new_amp / 2
+                        fit_result["corrective_action"] = int(PowerRabiCorrectiveAction.REDUCE_AMPLITUDE)
+                        fit_result["action_magnitude"] = new_amp
+                        node.log(
+                            f"[Adaptive] {q.name}: TOO_MANY_PERIODS ({num_periods:.2f} periods). "
+                            f"Rescaling {node.parameters.operation} amplitude: "
+                            f"{1e3 * current_amp:.2f} mV → {1e3 * new_amp:.2f} mV."
+                        )
                 else:
-                    # Degenerate case: fall back to normal update
+                    # Degenerate case (num_periods NaN / zero): fall back to normal update
                     operation.amplitude = fit_result["opt_amp"]
                     if node.parameters.operation == "x180":
                         q.xy.operations["x90"].amplitude = fit_result["opt_amp"] / 2
@@ -347,6 +434,17 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
                 if node.parameters.operation == "x180":
                     q.xy.operations["x90"].amplitude = fit_result["opt_amp"] / 2
                 if node.parameters.use_adaptive:
+                    # If duration adaptation was active, keep the adapted length and
+                    # clear the temp fields so future runs start fresh.
+                    temp_data = _ensure_temp_calibration(node.machine, q.name)
+                    if temp_data.adaptive_x180_length_ns is not None:
+                        node.log(
+                            f"[Adaptive] {q.name}: SUCCESS after duration adaptation. "
+                            f"Keeping adapted pulse length: {operation.length} ns. "
+                            f"Clearing adaptive length fields."
+                        )
+                        temp_data.adaptive_x180_length_ns = None
+                        temp_data.initial_x180_length_ns = None
                     fit_result["corrective_action"] = int(PowerRabiCorrectiveAction.NONE)
 
 

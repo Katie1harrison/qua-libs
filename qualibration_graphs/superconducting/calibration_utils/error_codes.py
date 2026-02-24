@@ -20,9 +20,6 @@ class QubitSpectroscopyErrorCode(IntEnum):
     NO_PEAK_FOUND = 1
     """No peak detected at any power level within frequency span."""
 
-    WEAK_PEAK_HIGH_POWER = 2
-    """Peak detected only at highest power levels (underpowered)."""
-
     OVER_SATURATED = 3
     """Linewidth exceeds threshold or high baseline across all powers (overpowered)."""
 
@@ -41,12 +38,6 @@ class QubitSpectroscopyCorrectiveAction(IntEnum):
 
     INCREASE_POWER = 20
     """Increasing drive power sweep range (magnitude: power shift in dBm)."""
-
-    CENTER_ON_WEAK_PEAK = 30
-    """Centering frequency on detected weak peak (magnitude: frequency shift in MHz)."""
-
-    ZOOM_IN_FREQUENCY_STEP = 40
-    """Centering on weak peak and zooming in: span set to 50 MHz, step set to 0.1 MHz (magnitude: new step in MHz)."""
 
     DECREASE_POWER = 50
     """Decreasing power due to over-saturation (magnitude: power shift in dBm)."""
@@ -157,6 +148,10 @@ class PowerRabiCorrectiveAction(IntEnum):
 
     INCREASE_AMPLITUDE = 30
     """Increasing base pulse amplitude to achieve ~1 period (magnitude: new amplitude in V)."""
+
+    INCREASE_DURATION = 40
+    """Increasing pulse duration to achieve ~1 period when amplitude and Octave gain are maxed
+    (magnitude: new duration in ns)."""
 
     RESET_ADAPTIVE_PARAMS = 99
     """Resetting all adaptive parameters after successful calibration."""

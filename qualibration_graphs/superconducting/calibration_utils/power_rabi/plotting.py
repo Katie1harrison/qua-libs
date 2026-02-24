@@ -13,7 +13,7 @@ u = unit(coerce_to_integer=True)
 
 def plot_raw_data_with_fit(ds: xr.Dataset, qubits: List[AnyTransmon], fits: xr.Dataset):
     """
-    Plots the power Rabi oscillations (IQ_abs magnitude) with fitted curves for the given qubits.
+    Plots the power Rabi oscillations (rotated I quadrature) with fitted curves for the given qubits.
 
     Parameters
     ----------
@@ -32,7 +32,7 @@ def plot_raw_data_with_fit(ds: xr.Dataset, qubits: List[AnyTransmon], fits: xr.D
     Notes
     -----
     - The function creates a grid of subplots, one for each qubit.
-    - Each subplot contains the raw IQ_abs data and the fitted oscillation curve.
+    - Each subplot contains the rotated I data and the fitted oscillation curve.
     """
     grid = QubitGrid(ds, [q.grid_location for q in qubits])
     for ax, qubit in grid_iter(grid):
@@ -79,15 +79,12 @@ def plot_individual_data_with_fit_1D(ax: Axes, ds: xr.Dataset, qubit: dict[str, 
         else:
             fitted_data = None
 
-        if hasattr(ds, "IQ_abs"):
-            data = "IQ_abs"
-            label = "IQ amplitude [mV]"
+        if hasattr(ds, "state"):
+            data = "state"
+            label = "Qubit state"
         elif hasattr(ds, "I"):
             data = "I"
             label = "Rotated I quadrature [mV]"
-        elif hasattr(ds, "state"):
-            data = "state"
-            label = "Qubit state"
         else:
             raise RuntimeError("The dataset must contain either 'I' or 'state' for the plotting function to work.")
 
@@ -120,15 +117,12 @@ def plot_individual_data_with_fit_2D(ax: Axes, ds: xr.Dataset, qubit: dict[str, 
     - If the fit dataset is provided, the fitted curve is plotted along with the raw data.
     """
 
-    # Prioritize IQ_abs (magnitude) over I component
-    if hasattr(ds, "IQ_abs"):
-        data = "IQ_abs"
+    if hasattr(ds, "state"):
+        data = "state"
     elif hasattr(ds, "I"):
         data = "I"
-    elif hasattr(ds, "state"):
-        data = "state"
     else:
-        raise RuntimeError("The dataset must contain either 'IQ_abs', 'I', or 'state' for the plotting function to work.")
+        raise RuntimeError("The dataset must contain either 'I' or 'state' for the plotting function to work.")
     (ds.assign_coords(amp_mV=ds.full_amp * 1e3).loc[qubit])[data].plot(
         ax=ax, add_colorbar=False, x="amp_mV", y="nb_of_pulses", robust=True
     )
