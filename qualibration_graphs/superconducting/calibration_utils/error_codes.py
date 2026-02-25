@@ -149,6 +149,10 @@ class PowerRabiCorrectiveAction(IntEnum):
     INCREASE_AMPLITUDE = 30
     """Increasing base pulse amplitude to achieve ~1 period (magnitude: new amplitude in V)."""
 
+    INCREASE_OCTAVE_GAIN = 35
+    """Increasing Octave RF upconversion gain when amplitude is at hardware limit
+    (magnitude: new gain in dB)."""
+
     INCREASE_DURATION = 40
     """Increasing pulse duration to achieve ~1 period when amplitude and Octave gain are maxed
     (magnitude: new duration in ns)."""

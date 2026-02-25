@@ -29,9 +29,14 @@ class TemporaryCalibrationData(QuamBase):
     # restored if a Rabi or Ramsey fit fails mid-loop
     initial_x180_amplitude: Optional[float] = None
     initial_qubit_f01: Optional[float] = None
-    # Selected spectroscopy drive power (dBm) saved by qubit_spectroscopy_vs_power on success;
-    # used by downstream nodes to know the power at which the qubit was found
+    # Initial LO/RF frequency (Hz) saved alongside initial_qubit_f01;
+    # restored together with f_01 if a Rabi or Ramsey fit fails mid-loop
+    initial_rf_frequency: Optional[float] = None
+    # Selected spectroscopy drive power (dBm) and Octave gain (dB) saved by
+    # qubit_spectroscopy_vs_power on success; used by downstream nodes to know the
+    # power setting at which the qubit was found
     selected_power_dbm: Optional[float] = None
+    selected_octave_gain_db: Optional[float] = None
     # Adaptive x180 pulse duration (ns) used when amplitude + Octave gain are both at maximum
     # and TOO_FEW_PERIODS is detected.  None means no duration adaptation is active.
     adaptive_x180_length_ns: Optional[float] = None

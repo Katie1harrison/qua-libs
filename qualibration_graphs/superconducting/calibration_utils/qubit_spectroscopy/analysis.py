@@ -56,12 +56,19 @@ def _get_resonator_amplitude(machine, qubit_name: str, key: str, data: xr.Datase
     Get resonator amplitude from temp_calibration with fallback to data statistics.
 
     Tries machine.temp_calibration[qubit_name].resonator_amplitudes[key] first.
-    Falls back to IQ_abs min/max from the current dataset if not available.
+    Falls back to I_rot min/max (or IQ_abs if I_rot is not yet computed) from the
+    current dataset if not available.
     """
     try:
         return machine.temp_calibration[qubit_name].resonator_amplitudes[key]
     except (KeyError, TypeError, AttributeError):
-        qubit_data = data.sel(qubit=qubit_name).IQ_abs
+        # Peak heights are measured in I_rot space; use I_rot statistics as fallback
+        # so the reference scale is consistent.  Fall back to IQ_abs when I_rot is
+        # not yet available (e.g. called before fit_raw_data has run).
+        if "I_rot" in data.data_vars:
+            qubit_data = data.sel(qubit=qubit_name).I_rot
+        else:
+            qubit_data = data.sel(qubit=qubit_name).IQ_abs
         if key == "min_amplitude":
             return float(qubit_data.min())
         elif key == "max_amplitude":
@@ -107,7 +114,7 @@ def fit_raw_data(ds: xr.Dataset, node: QualibrationNode) -> Tuple[xr.Dataset, di
     # rotate the data to the new I axis
     ds_fit = ds_fit.assign({"I_rot": ds_fit.I * np.cos(ds_fit.iw_angle) + ds_fit.Q * np.sin(ds_fit.iw_angle)})
     # Find the peak with minimal prominence as defined, if no such peak found, returns nan
-    fit_vals = peaks_dips(ds_fit.IQ_abs, dim="detuning", prominence_factor=5)
+    fit_vals = peaks_dips(ds_fit.I_rot, dim="detuning", prominence_factor=5)
     ds_fit = xr.merge([ds_fit, fit_vals])
     # Extract the relevant fitted parameters
     fit_data, fit_results = _extract_relevant_fit_parameters(ds_fit, node)
@@ -156,22 +163,31 @@ def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
     # saturation_amp_success = np.abs(fit.saturation_amplitude) < limits[0].max_wf_amplitude
     saturation_amp_success = True
 
-    # Peak amplitude fraction check (same logic as qubit_spectroscopy_vs_power):
-    #   baseline       = temp_calibration resonator min_amplitude (fallback: IQ_abs.min)
-    #   max_amp        = temp_calibration resonator max_amplitude (fallback: IQ_abs.max)
-    #   min_peak_height = min_peak_fraction * (max_amp - baseline)
-    #   accepted if     peak_value - baseline >= min_peak_height
+    # Peak amplitude fraction check:
+    #   reference range = temp_calibration resonator (max - min) amplitude (IQ_abs-based),
+    #                     which is the calibrated IQ dynamic range of the readout.
+    #                     Falls back to I_rot range from current data when not available.
+    #   min_peak_height = min_peak_fraction * reference_range
+    #   peak height     = I_rot_at_peak - I_rot_global_min   (measured in I_rot space)
+    #   accepted if     peak_height >= min_peak_height
+    #
+    # Using the resonator IQ_abs range as the reference rather than the I_rot range
+    # keeps the threshold stable across runs while the actual I_rot values vary with
+    # the rotation angle.
     machine = node.machine
     peak_heights = []
     peak_height_ok = []
     for q_name in fit.qubit.values:
-        baseline = _get_resonator_amplitude(machine, q_name, "min_amplitude", fit)
-        max_amp  = _get_resonator_amplitude(machine, q_name, "max_amplitude", fit)
-        min_peak_height = node.parameters.min_peak_fraction * (max_amp - baseline)
+        resonator_min = _get_resonator_amplitude(machine, q_name, "min_amplitude", fit)
+        resonator_max = _get_resonator_amplitude(machine, q_name, "max_amplitude", fit)
+        min_peak_height = node.parameters.min_peak_fraction * (resonator_max - resonator_min)
         pos = float(fit.position.sel(qubit=q_name).values)
+        # Measure peak height in I_rot space relative to the I_rot baseline (minimum).
+        I_rot_data = fit.I_rot.sel(qubit=q_name)
+        I_rot_baseline = float(I_rot_data.min().values)
         if np.isfinite(pos):
-            peak_val = float(fit.IQ_abs.sel(qubit=q_name, detuning=pos, method="nearest").values)
-            peak_height = peak_val - baseline
+            peak_val = float(I_rot_data.sel(detuning=pos, method="nearest").values)
+            peak_height = peak_val - I_rot_baseline
         else:
             peak_height = 0.0
         peak_heights.append(peak_height)

@@ -38,7 +38,7 @@ def plot_raw_data_with_fit(ds: xr.Dataset, qubits: List[AnyTransmon], fits: xr.D
     for ax, qubit in grid_iter(grid):
         plot_individual_data_with_fit(ax, ds, qubit, fits.sel(qubit=qubit["qubit"]))
 
-    grid.fig.suptitle("Qubit spectroscopy (|IQ| amplitude + fit)")
+    grid.fig.suptitle("Qubit spectroscopy (I_rot + fit)")
     grid.fig.set_size_inches(15, 9)
     grid.fig.tight_layout()
     return grid.fig
@@ -75,12 +75,12 @@ def plot_individual_data_with_fit(ax: Axes, ds: xr.Dataset, qubit: dict[str, str
         fitted_data = None
 
     # Create a first x-axis for full_freq_GHz
-    (fit.assign_coords(full_freq_GHz=fit.full_freq / u.GHz).IQ_abs / u.mV).plot(ax=ax, x="full_freq_GHz")
+    (fit.assign_coords(full_freq_GHz=fit.full_freq / u.GHz).I_rot / u.mV).plot(ax=ax, x="full_freq_GHz")
     ax.set_xlabel("RF frequency [GHz]")
-    ax.set_ylabel("IQ magnitude [mV]")
+    ax.set_ylabel("I_rot [mV]")
     # Create a second x-axis for detuning_MHz
     ax2 = ax.twiny()
-    (fit.assign_coords(detuning_MHz=fit.detuning / u.MHz).IQ_abs / u.mV).plot(ax=ax2, x="detuning_MHz", label="")
+    (fit.assign_coords(detuning_MHz=fit.detuning / u.MHz).I_rot / u.mV).plot(ax=ax2, x="detuning_MHz", label="")
     ax2.set_xlabel("Detuning [MHz]")
     # Plot the fitted data
     if fitted_data is not None:

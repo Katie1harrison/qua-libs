@@ -67,6 +67,23 @@ class NodeSpecificParameters(RunnableParameters):
     Minimum acceptable peak height as a fraction of the difference.
     """
 
+    peak_persistence_lookahead: int = 0
+    """
+    Number of consecutive higher-power levels that must also show a peak at a
+    similar frequency for the current peak to be considered real.
+    A peak that is absent from all of the next ``peak_persistence_lookahead``
+    power levels is discarded as an isolated noise artefact.
+    Set to 0 to disable persistence filtering entirely.
+    """
+
+    peak_persistence_freq_tolerance_hz: float = 5e6
+    """
+    Frequency tolerance (Hz) used when matching peaks across adjacent power
+    levels during persistence filtering.  Two peaks at different power values
+    are considered to be the same qubit transition if their detuning positions
+    differ by less than this amount.
+    """
+
 
 
 class Parameters(

@@ -38,7 +38,7 @@ def instrument_limits(channel: Union[IQChannel, MWChannel]) -> InstrumentLimits:
             # OPX+ and LF-FEM not in amplified-mode
             max_wf_amplitude=0.5,
             # A subjective "safe" value for x180 pulses
-            max_x180_wf_amplitude=0.3,
+            max_x180_wf_amplitude=0.5,
             # A subjective "safe" value assuming up to 10 qubits on the same channel
             max_readout_amplitude=0.05,
             units="V",

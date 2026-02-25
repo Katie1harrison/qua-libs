@@ -62,6 +62,7 @@ def _ensure_temp_calibration_fields(machine, qubit_name: str) -> TemporaryCalibr
         'adaptive_power_shift_dbm': None,
         'adaptive_num_shots': None,
         'selected_power_dbm': None,
+        'selected_octave_gain_db': None,
         'last_updated': None,
         'notes': None,
     }
@@ -356,7 +357,7 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
     POWER_INCREASE_DBM = 10.0    # Increase power when no/weak peak
     POWER_DECREASE_DBM = -10.0   # Decrease power when over-saturated
     MIN_POWER_DBM = -100.0       # Minimum allowed power
-    MAX_POWER_DBM = 50.0         # Maximum allowed power
+    MAX_POWER_DBM = 40.0         # Maximum allowed power
 
     with node.record_state_updates():
         for q in node.namespace["qubits"]:
@@ -478,9 +479,6 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
             # -----------------------------
             selected_power_dbm = node.results["fit_results"][q.name]["selected_power"]
 
-            # Save selected power to temp_calibration for downstream nodes
-            temp_data.selected_power_dbm = selected_power_dbm
-
             # -----------------------------
             # Selected qubit frequency (Hz)
             # -----------------------------
@@ -501,6 +499,11 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
                 operation="x180",
             )
 
+            # Save selected power and the Octave gain used to reach it so that
+            # downstream nodes (e.g. power_rabi) know the full RF chain state.
+            temp_data.selected_power_dbm = selected_power_dbm
+            temp_data.selected_octave_gain_db = float(new_power_settings.get("gain", 0.0))
+
             # -----------------------------
             # Update qubit frequency
             # -----------------------------
@@ -515,8 +518,8 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
                 f"  CORRECTIVE ACTION: RESET_ADAPTIVE_PARAMS\n"
                 f"  Updated state:\n"
                 f"    XY power          = {selected_power_dbm:.2f} dBm\n"
-                f"    Octave gain       = {new_power_settings['gain']:.2f} dBm\n"
-                f"    Pulse amplitude   = {new_power_settings['amplitude']:.2f}\n"
+                f"    Octave gain       = {new_power_settings['gain']:.2f} dB  (saved to temp_calibration)\n"
+                f"    Pulse amplitude   = {new_power_settings['amplitude']:.4f}\n"
                 f"    Qubit frequency   = {selected_freq / 1e9:.6f} GHz"
             )
 

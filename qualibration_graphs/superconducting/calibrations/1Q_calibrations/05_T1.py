@@ -22,6 +22,8 @@ from calibration_utils.T1 import (
     plot_raw_data_with_fit,
 )
 
+#TODO: make it adaptive to avoid fails
+
 
 # %% {Node initialisation}
 description = """

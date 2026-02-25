@@ -50,6 +50,61 @@ def _peak_index(iq_abs, baseline, min_height):
     return idx
 
 
+def _apply_persistence_filter(
+    peak_indices: np.ndarray,
+    detuning: np.ndarray,
+    lookahead: int,
+    freq_tolerance_hz: float,
+) -> np.ndarray:
+    """
+    Remove isolated peaks that do not persist at higher power levels.
+
+    A peak at power index i is discarded (set to -1) when none of the next
+    ``lookahead`` higher power levels contain a peak within
+    ``freq_tolerance_hz`` of it.  Power levels at the very end of the sweep
+    (where fewer than ``lookahead`` higher levels exist) are kept as-is —
+    their persistence cannot be assessed.
+
+    Parameters
+    ----------
+    peak_indices : (n_power,) int array
+        Index of the detected peak in the detuning axis for each power level.
+        -1 means no peak was found at that power.
+    detuning : (n_detuning,) float array
+        Detuning axis values in Hz.
+    lookahead : int
+        Number of higher power levels to inspect for a matching peak.
+    freq_tolerance_hz : float
+        Maximum allowed frequency separation (Hz) for two peaks to be
+        considered the same transition.
+    """
+    n_power = len(peak_indices)
+    filtered = peak_indices.copy()
+
+    for i in range(n_power):
+        if peak_indices[i] < 0:
+            continue  # no peak here — nothing to filter
+
+        n_higher = n_power - i - 1
+        if n_higher == 0:
+            continue  # no higher powers to check — keep unconditionally
+
+        n_to_check = min(lookahead, n_higher)
+        freq_i = detuning[peak_indices[i]]
+
+        found = False
+        for j in range(i + 1, i + 1 + n_to_check):
+            if peak_indices[j] >= 0:
+                if abs(detuning[peak_indices[j]] - freq_i) <= freq_tolerance_hz:
+                    found = True
+                    break
+
+        if not found:
+            filtered[i] = -1
+
+    return filtered
+
+
 def _compute_fwhm_around_peak(detuning, signal, peak_idx) -> float:
     """
     Compute FWHM of the peak at peak_idx using linear interpolation at the
@@ -261,6 +316,26 @@ def fit_raw_data(
     )
 
     ds["peak_index"] = peak_index
+
+    # Persistence filter: discard peaks that do not reappear at any of the
+    # next `peak_persistence_lookahead` higher-power levels within the
+    # allowed frequency tolerance.  Such isolated peaks are most likely noise
+    # artefacts rather than the real qubit transition.
+    if int(p.peak_persistence_lookahead) > 0:
+        peak_index = xr.apply_ufunc(
+            _apply_persistence_filter,
+            peak_index,
+            ds.detuning,
+            kwargs={
+                "lookahead": int(p.peak_persistence_lookahead),
+                "freq_tolerance_hz": float(p.peak_persistence_freq_tolerance_hz),
+            },
+            input_core_dims=[["power"], ["detuning"]],
+            output_core_dims=[["power"]],
+            vectorize=True,
+            output_dtypes=[int],
+        )
+        ds["peak_index"] = peak_index
 
     ds["peak_height"] = xr.where(
         peak_index >= 0,

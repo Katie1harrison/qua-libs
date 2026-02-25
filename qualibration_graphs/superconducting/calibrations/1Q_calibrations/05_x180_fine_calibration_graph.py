@@ -122,14 +122,21 @@ def _ensure_temp_calibration(machine, qubit_name: str):
         machine.temp_calibration[qubit_name] = TemporaryCalibrationData()
     temp = machine.temp_calibration[qubit_name]
     # Backward-compatibility: add fields that older state.json files may omit
-    for field in ("initial_x180_amplitude", "initial_qubit_f01"):
+    for field in ("initial_x180_amplitude", "initial_qubit_f01", "initial_rf_frequency"):
         if not hasattr(temp, field):
             object.__setattr__(temp, field, None)
     return temp
 
 
 def _restore_initial_state(machine, target: str) -> None:
-    """Restore x180/x90 amplitude and f_01/RF_frequency to their pre-loop values."""
+    """Restore x180/x90 amplitude and f_01/RF_frequency to their pre-loop values.
+
+    After restoring in-memory values, ``machine.save()`` is called to persist
+    the restored state to the JSON file.  This is necessary because the Ramsey
+    node's ``update_state`` already called ``machine.save()`` with the
+    Ramsey-modified frequencies; without an explicit save here those would
+    remain in the persistent state even though the in-memory values are correct.
+    """
     if target not in _loop_state["initial_x180_amplitude"]:
         return  # Nothing stored yet for this qubit; nothing to restore
     q = machine.qubits[target]
@@ -149,6 +156,15 @@ def _restore_initial_state(machine, target: str) -> None:
             temp.initial_x180_amplitude = None
         if hasattr(temp, "initial_qubit_f01"):
             temp.initial_qubit_f01 = None
+        if hasattr(temp, "initial_rf_frequency"):
+            temp.initial_rf_frequency = None
+    # Persist the restored state so the JSON file reflects the rollback.
+    # The Ramsey node already called machine.save() with modified frequencies;
+    # without this call those would survive in state.json.
+    try:
+        machine.save()
+    except Exception as exc:
+        logger.warning(f"[X180 fine] {target}: machine.save() after restore failed: {exc}")
 
 
 
@@ -191,35 +207,49 @@ def should_repeat_x180_calibration(node: QualibrationNode, target: str) -> bool:
         temp = _ensure_temp_calibration(machine, target)
 
         if temp.initial_x180_amplitude is not None:
-            # Use externally pre-set values (most accurate pre-graph baseline)
+            # Bringup backup is available — load it for possible Rabi-failure restore.
             _loop_state["initial_x180_amplitude"][target] = temp.initial_x180_amplitude
             _loop_state["initial_x90_amplitude"][target] = temp.initial_x180_amplitude / 2
             _loop_state["initial_f01"][target] = temp.initial_qubit_f01 or float(q.f_01)
+            if hasattr(temp, "initial_rf_frequency") and temp.initial_rf_frequency is not None:
+                _loop_state["initial_rf_frequency"][target] = temp.initial_rf_frequency
+            else:
+                _loop_state["initial_rf_frequency"][target] = float(q.xy.RF_frequency)
+            logger.info(
+                f"[X180 fine] {target}: Bringup backup loaded – "
+                f"x180={1e3 * _loop_state['initial_x180_amplitude'][target]:.2f} mV, "
+                f"f_01={_loop_state['initial_f01'][target] / 1e9:.6f} GHz "
+                f"(will restore if power_rabi fails)."
+            )
         else:
-            # Capture current machine state as baseline (post-first-iteration)
-            _loop_state["initial_x180_amplitude"][target] = float(q.xy.operations["x180"].amplitude)
-            _loop_state["initial_x90_amplitude"][target] = float(q.xy.operations["x90"].amplitude)
-            _loop_state["initial_f01"][target] = float(q.f_01)
-            # Persist to temp_calibration for cross-run safety
-            temp.initial_x180_amplitude = _loop_state["initial_x180_amplitude"][target]
-            temp.initial_qubit_f01 = _loop_state["initial_f01"][target]
-
-        _loop_state["initial_rf_frequency"][target] = float(q.xy.RF_frequency)
+            # No bringup backup available; restore-on-failure is disabled.
+            # Clear any stale _loop_state entries from a previous run.
+            for key in ("initial_x180_amplitude", "initial_x90_amplitude",
+                        "initial_f01", "initial_rf_frequency"):
+                _loop_state[key].pop(target, None)
+            logger.info(f"[X180 fine] {target}: No bringup backup found; restore-on-failure disabled.")
         _loop_state["detuning_history"][target] = []
         _loop_state["initialized"][target] = True
-        logger.info(
-            f"[X180 fine] {target}: Initial state captured – "
-            f"x180={1e3 * _loop_state['initial_x180_amplitude'][target]:.2f} mV, "
-            f"f_01={_loop_state['initial_f01'][target] / 1e9:.6f} GHz."
-        )
 
     # ── Check for fit failure ─────────────────────────────────────────────────
     if node.outcomes.get(target) == "failed":
-        logger.warning(
-            f"[X180 fine] {target}: Fit failed. "
-            "Restoring initial state and stopping loop."
+        _power_rabi_node = node._elements.get("power_rabi")
+        power_rabi_failed = (
+            _power_rabi_node is not None
+            and _power_rabi_node.outcomes.get(target) == "failed"
         )
-        _restore_initial_state(machine, target)
+        if power_rabi_failed and target in _loop_state["initial_x180_amplitude"]:
+            logger.warning(
+                f"[X180 fine] {target}: Power Rabi failed. "
+                "Restoring bringup state and stopping loop."
+            )
+            _restore_initial_state(machine, target)
+        else:
+            logger.warning(
+                f"[X180 fine] {target}: Fit failed "
+                f"({'Ramsey' if not power_rabi_failed else 'Rabi, no backup'}). "
+                "Stopping loop without restore."
+            )
         _loop_state["initialized"][target] = False
         _loop_state["any_failed"] = True
         return False
@@ -267,6 +297,8 @@ def should_repeat_x180_calibration(node: QualibrationNode, target: str) -> bool:
                 temp.initial_x180_amplitude = None
             if hasattr(temp, "initial_qubit_f01"):
                 temp.initial_qubit_f01 = None
+            if hasattr(temp, "initial_rf_frequency"):
+                temp.initial_rf_frequency = None
         _loop_state["initialized"][target] = False
         return False  # Converged
 
