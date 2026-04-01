@@ -62,11 +62,6 @@ class NodeSpecificParameters(RunnableParameters):
     Safety margin below the critical power (in dB).
     """
 
-    min_peak_fraction: float = 0.1
-    """
-    Minimum acceptable peak height as a fraction of the difference.
-    """
-
     peak_persistence_lookahead: int = 0
     """
     Number of consecutive higher-power levels that must also show a peak at a
@@ -82,6 +77,21 @@ class NodeSpecificParameters(RunnableParameters):
     levels during persistence filtering.  Two peaks at different power values
     are considered to be the same qubit transition if their detuning positions
     differ by less than this amount.
+    """
+
+    # ------------------------------------------------------------------
+    # Signal selection
+    # ------------------------------------------------------------------
+    signal_source: str = "I_rot"
+    """
+    Which signal to use for peak detection and plotting.
+      "I_rot"  – IQ-rotated I component (default). Maximises SNR by projecting
+                 the 2D IQ trajectory onto the axis of largest qubit-induced
+                 displacement. Sign ambiguity is resolved automatically.
+      "IQ_abs" – Magnitude of the IQ vector. No rotation required; useful when
+                 the IQ trajectory is poorly conditioned or the user wants a
+                 rotation-free view. The qubit feature may appear as a peak or
+                 dip depending on the device; the sign is resolved automatically.
     """
 
 

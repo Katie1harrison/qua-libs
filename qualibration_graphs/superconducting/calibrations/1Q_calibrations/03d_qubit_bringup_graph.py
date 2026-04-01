@@ -61,7 +61,6 @@ class QubitOptimizationParameters(GraphParameters):
     spec_vs_power_operation_len_ns: int = 200_000
     spec_vs_power_linewidth_threshold_hz: float = 10e6
     spec_vs_power_max_amplitude_opx: float = 0.24
-    spec_vs_power_min_peak_fraction: float = 0.3
     spec_vs_power_power_buffer_db: float = 3.0
 
     # Standard qubit spectroscopy
@@ -70,7 +69,6 @@ class QubitOptimizationParameters(GraphParameters):
     qubit_spec_operation_len_ns: int = 200_000
     qubit_spec_operation_amplitude_factor: float = 1.0
     qubit_spec_num_shots: int = 100
-    qubit_spec_min_peak_fraction: float = 0.3
 
     # Power Rabi
     rabi_min_amp_factor: float = 0.001

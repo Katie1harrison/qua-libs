@@ -253,7 +253,7 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
             # Save the user's initial guess BEFORE overwriting (only on first run;
             # retries must not clobber it so we can always restore the original value).
             temp_data = _ensure_temp_calibration(machine, q.name)
-            if temp_data.initial_resonator_f01 is None:
+            if temp_data.initial_resonator_f01 is None and q.resonator.f_01 is not None:
                 temp_data.initial_resonator_f01 = float(q.resonator.f_01)
                 temp_data.initial_resonator_RF_frequency = float(q.resonator.RF_frequency)
 

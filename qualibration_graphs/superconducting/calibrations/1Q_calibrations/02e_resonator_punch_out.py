@@ -56,7 +56,6 @@ def _ensure_temp_calibration_fields(machine, qubit_name: str) -> TemporaryCalibr
 
     # Define all expected fields with their default values
     expected_fields = {
-        'resonator_amplitudes': None,
         'parameters': None,
         'adaptive_frequency_span_mhz': None,
         'adaptive_power_shift_dbm': None,

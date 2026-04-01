@@ -4,7 +4,7 @@ from dataclasses import asdict
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
-from calibration_utils.qubit_spectroscopy import (
+from calibration_utils.qubit_spectroscopy_ef import (
     Parameters,
     fit_raw_data,
     log_fitted_results,
@@ -116,8 +116,8 @@ def create_qua_program(node: QualibrationNode[Parameters, Quam]):
                         qubit.xy.update_frequency(qubit.xy.intermediate_frequency)
                         # Drive the qubit to the excited state
                         qubit.xy.play("x180")
-                        # Update the qubit frequency to scan around the expected f_01
-                        qubit.xy.update_frequency(df - qubit.anharmonicity + qubit.xy.intermediate_frequency)
+                        # Update the qubit IF to scan around the EF transition (f_ge + anharmonicity)
+                        qubit.xy.update_frequency(df + qubit.anharmonicity + qubit.xy.intermediate_frequency)
                         # Play the saturation pulse
                         qubit.xy.play(
                             operation,
@@ -125,6 +125,11 @@ def create_qua_program(node: QualibrationNode[Parameters, Quam]):
                             duration=duration
                             >> 2,  # Bit shift by 2 as a fast division by 4 to convert from ns to clock cycles
                         )
+                        # Reset back to the ge frequency and apply a ge π-pulse.
+                        # This maps |e⟩ → |g⟩ (off EF resonance) while leaving |f⟩
+                        # unaffected (on EF resonance), maximising readout contrast.
+                        qubit.xy.update_frequency(qubit.xy.intermediate_frequency)
+                        qubit.xy.play("x180")
                     align()
 
                     for i, qubit in multiplexed_qubits.items():
@@ -216,7 +221,7 @@ def analyse_data(node: QualibrationNode[Parameters, Quam]):
 @node.run_action(skip_if=node.parameters.simulate)
 def plot_data(node: QualibrationNode[Parameters, Quam]):
     """Plot the raw and fitted data in specific figures whose shape is given by qubit.grid_location."""
-    fig_raw_fit = plot_raw_data_with_fit(node.results["ds_raw"], node.namespace["qubits"], node.results["ds_fit"])
+    fig_raw_fit = plot_raw_data_with_fit(node.results["ds_raw"], node.namespace["qubits"], node.results["ds_fit"], find_dip=node.parameters.find_dip)
     plt.show()
     # Store the generated figures
     node.results["figures"] = {
@@ -232,8 +237,13 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
         for q in node.namespace["qubits"]:
             if node.outcomes[q.name] == "failed":
                 continue
-            # Update the qubit anharmonicity based on the fitted results
-            q.anharmonicity -= node.results["fit_results"][q.name]["relative_freq"]
+            # Shift anharmonicity by the found detuning: actual EF = f_ge + anharmonicity + relative_freq
+            q.anharmonicity += node.results["fit_results"][q.name]["relative_freq"]
+
+            if node.parameters.update_integration_weights_angle:
+                q.resonator.operations["readout"].integration_weights_angle = (
+                    node.results["fit_results"][q.name]["iw_angle"]
+                )
 
 
 # %% {Save_results}

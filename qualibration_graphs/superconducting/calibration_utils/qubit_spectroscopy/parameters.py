@@ -21,8 +21,11 @@ class NodeSpecificParameters(RunnableParameters):
     """Target peak width in Hz. Default is 3e6 Hz."""
     update_pulses_amplitude: bool = False
     """Whether to update the saturation pulse and x180/x90 pulse amplitudes based on the peak width. Default is False"""
-    min_peak_fraction: float = 0.3
-    """Minimum required peak amplitude as a fraction of the I_rot (max - min) range. Peaks smaller than this fraction are rejected. Default is 0.3."""
+    find_dip: bool = False
+    """Set True for reflection readout where the qubit appears as a dip in I_rot (e.g. SRF setups)."""
+    signal_source: str = "I_rot"
+    """Signal used for analysis and plotting: 'I_rot' (PCA-rotated quadrature) or 'IQ_abs' (magnitude).
+    When 'IQ_abs' is chosen the integration weight angle is NOT updated."""
 
 
 class Parameters(

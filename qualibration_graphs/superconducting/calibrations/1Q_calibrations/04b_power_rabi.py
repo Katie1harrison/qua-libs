@@ -101,6 +101,11 @@ def create_qua_program(node: QualibrationNode[Parameters, Quam]):
         "amp_prefactor": xr.DataArray(amps, attrs={"long_name": "pulse amplitude prefactor"}),
     }
 
+    # Apply operation_length_in_ns override before config generation (modifies QUAM in-memory)
+    if node.parameters.operation_length_in_ns is not None:
+        for qubit in qubits:
+            qubit.xy.operations[operation].length = node.parameters.operation_length_in_ns
+
     with program() as node.namespace["qua_program"]:
         I, I_st, Q, Q_st, n, n_st = node.machine.declare_qua_variables()
         if node.parameters.use_state_discrimination:
@@ -146,23 +151,11 @@ def create_qua_program(node: QualibrationNode[Parameters, Quam]):
         with stream_processing():
             n_st.save("n")
             for i, qubit in enumerate(qubits):
-                if operation == "x180":
-                    if node.parameters.use_state_discrimination:
-                        state_st[i].buffer(len(amps)).buffer(
-                            np.ceil(node.parameters.max_number_pulses_per_sweep / 2)
-                        ).average().save(f"state{i + 1}")
-                    else:
-                        I_st[i].buffer(len(amps)).buffer(len(N_pi_vec)).average().save(f"I{i + 1}")
-                        Q_st[i].buffer(len(amps)).buffer(len(N_pi_vec)).average().save(f"Q{i + 1}")
-
-                elif operation in ["x90", "-x90", "y90", "-y90"]:
-                    if node.parameters.use_state_discrimination:
-                        state_st[i].buffer(len(amps)).buffer(len(N_pi_vec)).average().save(f"state{i + 1}")
-                    else:
-                        I_st[i].buffer(len(amps)).buffer(len(N_pi_vec)).average().save(f"I{i + 1}")
-                        Q_st[i].buffer(len(amps)).buffer(len(N_pi_vec)).average().save(f"Q{i + 1}")
+                if node.parameters.use_state_discrimination:
+                    state_st[i].buffer(len(amps)).buffer(len(N_pi_vec)).average().save(f"state{i + 1}")
                 else:
-                    raise ValueError(f"Unrecognized operation {operation}.")
+                    I_st[i].buffer(len(amps)).buffer(len(N_pi_vec)).average().save(f"I{i + 1}")
+                    Q_st[i].buffer(len(amps)).buffer(len(N_pi_vec)).average().save(f"Q{i + 1}")
 
 
 # %% {Simulate}
@@ -544,6 +537,10 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
                     operation.amplitude = safe_amp
                     if node.parameters.operation == "x180":
                         q.xy.operations["x90"].amplitude = safe_amp / 2
+                    # Save the pulse length used in this run
+                    pulse_len = fit_result.get("pulse_length_ns", float("nan"))
+                    if np.isfinite(pulse_len):
+                        operation.length = int(pulse_len)
                     if node.parameters.use_adaptive:
                         # If duration adaptation was active, keep the adapted length and
                         # clear the temp fields so future runs start fresh.

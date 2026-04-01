@@ -32,6 +32,8 @@ class FitParameters:
     """PowerRabiCorrectiveAction: action applied (or to be applied) to fix the issue."""
     action_magnitude: float = 0.0
     """Magnitude of the corrective action (interpretation depends on corrective_action)."""
+    pulse_length_ns: float = float("nan")
+    """Pulse length used during this calibration run [ns]. Saved to QUAM on success."""
 
 
 def log_fitted_results(fit_results: Dict, log_callable=None):
@@ -75,7 +77,8 @@ def process_raw_dataset(ds: xr.Dataset, node: QualibrationNode):
     if not node.parameters.use_state_discrimination:
         ds = convert_IQ_to_V(ds, node.namespace["qubits"])
 
-    if node.name == "13_power_rabi_ef":
+    _is_ef = not hasattr(node.parameters, "operation")
+    if _is_ef:
         full_amp = np.array([ds.amp_prefactor * q.xy.operations["EF_x180"].amplitude for q in node.namespace["qubits"]])
     else:
         full_amp = np.array(
@@ -104,9 +107,10 @@ def fit_raw_data(ds: xr.Dataset, node: QualibrationNode) -> Tuple[xr.Dataset, di
         Dataset containing the fit results.
     """
     max_pulses = getattr(node.parameters, "max_number_pulses_per_sweep", 1)
-    operation = getattr(node.parameters, "operation", "EF_x180" if node.name == "13_power_rabi_ef" else "x180")
+    _is_ef = not hasattr(node.parameters, "operation")
+    operation = getattr(node.parameters, "operation", "EF_x180" if _is_ef else "x180")
     if max_pulses == 1:
-        ds_fit = ds.sel(nb_of_pulses=1) if node.name != "13_power_rabi_ef" else ds
+        ds_fit = ds if _is_ef else ds.sel(nb_of_pulses=1)
         # Fit the power Rabi oscillations
         if node.parameters.use_state_discrimination:
             fit_vals = fit_oscillation(ds_fit.state, "amp_prefactor")
@@ -157,9 +161,15 @@ def _compute_chi2(fit: xr.Dataset) -> xr.DataArray:
     for q in fit.qubit.values:
         fit_q = fit.sel(qubit=q)
 
-        i_data = fit_q.I
-        if "nb_of_pulses" in i_data.dims:
-            i_data = i_data.sel(nb_of_pulses=1)
+        # Use state discrimination data when available, else fall back to I
+        if "I" in fit_q:
+            i_data = fit_q.I
+            if "nb_of_pulses" in i_data.dims:
+                i_data = i_data.sel(nb_of_pulses=1)
+        else:
+            i_data = fit_q.state
+            if "nb_of_pulses" in i_data.dims:
+                i_data = i_data.sel(nb_of_pulses=1)
         data = i_data.values  # (N,)
 
         a = float(fit_q.fit.sel(fit_vals="a").item())
@@ -181,7 +191,8 @@ def _compute_chi2(fit: xr.Dataset) -> xr.DataArray:
 def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
     """Add metadata to the dataset and fit results."""
     max_pulses = getattr(node.parameters, "max_number_pulses_per_sweep", 1)
-    operation = getattr(node.parameters, "operation", "EF_x180" if node.name == "13_power_rabi_ef" else "x180")
+    _is_ef = not hasattr(node.parameters, "operation")
+    operation = getattr(node.parameters, "operation", "EF_x180" if _is_ef else "x180")
 
     if max_pulses == 1:
         # Process the fit parameters to get the right amplitude
@@ -217,7 +228,7 @@ def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
             "long_name": "factor to get a pi pulse",
             "units": "Hz",
         }
-        if node.name == "13_power_rabi_ef":
+        if _is_ef:
             current_amps = xr.DataArray(
                 [q.xy.operations["EF_x180"].amplitude for q in node.namespace["qubits"]],
                 coords=dict(qubit=fit.qubit.data),
@@ -294,6 +305,13 @@ def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
             q_chi2 = float("nan")
             error_code = PowerRabiErrorCode.SUCCESS if q_success else PowerRabiErrorCode.NO_OSCILLATION
 
+        # Record the pulse length used in this run
+        q_obj = next((qb for qb in node.namespace["qubits"] if qb.name == q), None)
+        try:
+            pulse_length_ns = float(q_obj.xy.operations[operation].length) if q_obj else float("nan")
+        except Exception:
+            pulse_length_ns = float("nan")
+
         fit_results[q] = FitParameters(
             opt_amp_prefactor=q_opt_amp_prefactor,
             opt_amp=q_opt_amp,
@@ -304,5 +322,6 @@ def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
             error_code=int(error_code),
             corrective_action=int(PowerRabiCorrectiveAction.NONE),
             action_magnitude=0.0,
+            pulse_length_ns=pulse_length_ns,
         )
     return fit, fit_results

@@ -20,6 +20,8 @@ from calibration_utils.qubit_spectroscopy_vs_power import (
     fit_raw_data,
     log_fitted_results,
     plot_raw_data_with_fit,
+    plot_gradient_score_diagnostics,
+    plot_iq_pca_diagnostics,
 )
 from calibration_utils.error_codes import (
     QubitSpectroscopyErrorCode,
@@ -56,7 +58,6 @@ def _ensure_temp_calibration_fields(machine, qubit_name: str) -> TemporaryCalibr
 
     # Define all expected fields with their default values
     expected_fields = {
-        'resonator_amplitudes': None,
         'parameters': None,
         'adaptive_frequency_span_mhz': None,
         'adaptive_power_shift_dbm': None,
@@ -125,7 +126,6 @@ def custom_param(node: QualibrationNode[Parameters, Quam]):
     # node.parameters.operation = "saturation"
     # node.parameters.operation_len_in_ns = 200_000
     # node.parameters.max_amplitude_opx = 0.3
-    # node.parameters.min_peak_fraction = 0.3
     pass
 
 
@@ -329,9 +329,28 @@ def plot_data(node: QualibrationNode[Parameters, Quam]):
         node.results["ds_raw"],
         node.namespace["qubits"],
         node.results["ds_fit"],
+        signal_source=node.parameters.signal_source,
     )
     plt.show()
-    node.results["figures"] = {"spectroscopy_vs_power": fig}
+
+    fig_pca = plot_iq_pca_diagnostics(
+        node.results["ds_fit"],
+        node.namespace["qubits"],
+    )
+    plt.show()
+
+    fig_grad = plot_gradient_score_diagnostics(
+        node.results["ds_fit"],
+        node.namespace["qubits"],
+        signal_source=node.parameters.signal_source,
+    )
+    plt.show()
+
+    node.results["figures"] = {
+        "spectroscopy_vs_power": fig,
+        "iq_pca_diagnostics": fig_pca,
+        "gradient_score_diagnostics": fig_grad,
+    }
 
 
 # %% {Update_state}
@@ -365,10 +384,6 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
             # This will create the object if it doesn't exist, or replace it with a proper
             # instance if fields are missing
             temp_data = _ensure_temp_calibration_fields(node.machine, q.name)
-
-            # Initialize resonator_amplitudes if needed (following resonator_spectroscopy pattern)
-            if temp_data.resonator_amplitudes is None:
-                temp_data.resonator_amplitudes = {}
 
             if node.outcomes[q.name] == "failed":
                 # -----------------------------
@@ -509,6 +524,16 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
             # -----------------------------
             q.xy.RF_frequency = selected_freq
             q.f_01 = selected_freq
+
+            # -----------------------------
+            # Save IQ rotation angle (integration weight angle)
+            # -----------------------------
+            iw_angle = node.results["fit_results"][q.name].get("iw_angle", float("nan"))
+            if np.isfinite(iw_angle):
+                prev_angle = q.resonator.operations["readout"].integration_weights_angle
+                q.resonator.operations["readout"].integration_weights_angle = (
+                    (prev_angle + iw_angle) % (2 * np.pi)
+                )
 
             # -----------------------------
             # Logging

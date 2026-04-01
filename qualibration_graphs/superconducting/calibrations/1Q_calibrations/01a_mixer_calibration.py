@@ -56,7 +56,48 @@ def execute_qua_program(node: QualibrationNode[Parameters, Quam]):
             node.namespace["calibration_results"][qubit.name] = {
                 "resonator": calibration_results[0],
                 "xy_drive": calibration_results[1],
+                "cavity_mode_drive": None,
             }
+        if node.parameters.calibrate_cavity_drive:
+            for cavity in node.machine.cavities.values():
+                for mode in [cavity.alice, cavity.bob]:
+                    if mode is None or mode.cavity_mode_drive is None:
+                        continue
+                    drive = mode.cavity_mode_drive
+                    if not hasattr(drive, "frequency_converter_up"):
+                        continue
+                    cal = qm.calibrate_element(
+                        drive.name,
+                        {drive.frequency_converter_up.LO_frequency: (drive.intermediate_frequency,)},
+                    )
+                    node.namespace["calibration_results"][mode.name] = {
+                        "resonator": None,
+                        "xy_drive": None,
+                        "cavity_mode_drive": cal,
+                    }
+
+        if node.parameters.calibrate_sideband_drive:
+            pairs = getattr(node.machine, "cavity_transmon_pairs", {})
+            for pair_key, pair in pairs.items():
+                drive = getattr(pair, "sideband_drive", None)
+                if drive is None:
+                    continue
+                # Skip if RF_frequency or LO_frequency not yet set (pre-spectroscopy)
+                if drive.RF_frequency is None:
+                    continue
+                fc = getattr(drive, "frequency_converter_up", None)
+                if fc is None or getattr(fc, "LO_frequency", None) is None:
+                    continue
+                cal = qm.calibrate_element(
+                    drive.name,
+                    {fc.LO_frequency: (drive.intermediate_frequency,)},
+                )
+                node.namespace["calibration_results"][pair_key] = {
+                    "resonator": None,
+                    "xy_drive": None,
+                    "cavity_mode_drive": None,
+                    "sideband_drive": cal,
+                }
 
 
 # %% {Analyse_data}

@@ -1,4 +1,4 @@
-from typing import Literal, Protocol, runtime_checkable
+from typing import Literal, Optional, Protocol, runtime_checkable
 
 import numpy as np
 from qualibrate import NodeParameters
@@ -22,8 +22,14 @@ class BasePowerRabiParameters(RunnableParameters):
 class NodeSpecificParameters(BasePowerRabiParameters):
     """04b-specific parameters (GE power Rabi with optional error amplification)."""
 
-    operation: Literal["x180", "x90", "-x90", "y90", "-y90"] = "x180"
-    """Type of operation to perform. Default is "x180"."""
+    operation: str = "x180"
+    """Name of the QUAM operation (pulse) to calibrate. Default is 'x180'.
+    Can be any operation defined in qubit.xy.operations, e.g. 'x90', 'selective_x180'."""
+    operation_length_in_ns: Optional[int] = None
+    """Pulse length in ns to use for this run. If None (default), uses the length
+    currently stored in the QUAM state for the selected operation. If set, overrides
+    the QUAM length before the QUA program is generated; the override is saved to
+    the QUAM state on a successful fit."""
     max_number_pulses_per_sweep: int = 1
     """Maximum number of Rabi pulses per sweep (error amplification). Default is 1."""
     update_x90: bool = True
@@ -80,12 +86,13 @@ def get_number_of_pulses(node_parameter: BasePowerRabiParameters):
         return np.array([1], dtype=int)
 
     if node_parameter.max_number_pulses_per_sweep > 1:
-        if node_parameter.operation == "x180":
-            N_pulses = np.arange(1, node_parameter.max_number_pulses_per_sweep, 2).astype(int)
-        elif node_parameter.operation in ["x90", "-x90", "y90", "-y90"]:
+        _op = node_parameter.operation
+        if _op in ["x90", "-x90", "y90", "-y90"]:
+            # x90-type: use multiples of 4 for error amplification
             N_pulses = np.arange(2, node_parameter.max_number_pulses_per_sweep, 4).astype(int)
         else:
-            raise ValueError(f"Unrecognized operation {node_parameter.operation}.")
+            # x180-type (x180, selective_x180, EF_x180, …): use odd numbers
+            N_pulses = np.arange(1, node_parameter.max_number_pulses_per_sweep, 2).astype(int)
     else:
         N_pulses = np.linspace(
             1,

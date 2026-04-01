@@ -166,15 +166,13 @@ def create_qua_program(node: QualibrationNode[Parameters, Quam]):
                     # Second excited state iq blobs for all qubits
                     # Qubit initialization
                     for i, qubit in multiplexed_qubits.items():
-                        qubit.reset(node.parameters.reset_type, node.parameters.simulate)
-                        if node.parameters.reset_type == "thermal":
-                            qubit.wait(2 * qubit.thermalization_time * u.ns)
+                        qubit.xy.wait(2 * qubit.thermalization_time * u.ns)
                     align()
 
                     # Qubit readout
                     for i, qubit in multiplexed_qubits.items():
                         qubit.xy.play("x180")
-                        update_frequency(qubit.xy.name, qubit.xy.intermediate_frequency - qubit.anharmonicity)
+                        update_frequency(qubit.xy.name, qubit.xy.intermediate_frequency + qubit.anharmonicity)
                         qubit.xy.play("EF_x180")
                         update_frequency(qubit.xy.name, qubit.xy.intermediate_frequency)
                         qubit.align()

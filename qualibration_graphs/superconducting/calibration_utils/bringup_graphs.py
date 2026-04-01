@@ -197,7 +197,6 @@ def build_resonator_bringup(
         broad_readout_power_dbm, broad_max_amp
         high_power_frequency_span_mhz, high_power_frequency_step_mhz,
         high_power_num_shots, high_power_readout_power_dbm, high_power_max_amp,
-        save_resonator_amplitudes, min_dip_contrast, lo_leakage_exclusion_mhz
         punch_out_frequency_span_mhz, punch_out_frequency_step_mhz,
         punch_out_min_power_dbm, punch_out_max_power_dbm, punch_out_num_power_points,
         punch_out_max_amp, punch_out_num_shots, punch_out_frequency_shift_threshold_hz,
@@ -238,9 +237,6 @@ def build_resonator_bringup(
                 frequency_span_in_mhz=p.high_power_frequency_span_mhz,
                 frequency_step_in_mhz=p.high_power_frequency_step_mhz,
                 num_shots=p.high_power_num_shots,
-                save_amplitudes=p.save_resonator_amplitudes,
-                min_dip_contrast=p.min_dip_contrast,
-                lo_leakage_exclusion_mhz=p.lo_leakage_exclusion_mhz,
                 readout_power_dbm=p.high_power_readout_power_dbm,
                 max_amp=p.high_power_max_amp,
             )
@@ -282,9 +278,6 @@ def build_resonator_bringup(
             frequency_span_in_mhz=p.low_power_frequency_span_mhz,
             frequency_step_in_mhz=p.low_power_frequency_step_mhz,
             num_shots=p.low_power_num_shots,
-            save_amplitudes=p.save_resonator_amplitudes,
-            min_dip_contrast=p.min_dip_contrast,
-            lo_leakage_exclusion_mhz=p.lo_leakage_exclusion_mhz,
             readout_power_dbm=p.low_power_readout_power_dbm,
             max_amp=p.low_power_max_amp,
         )
@@ -318,10 +311,9 @@ def build_qubit_calibration(
         spec_vs_power_min_power_dbm, spec_vs_power_max_power_dbm,
         spec_vs_power_operation, spec_vs_power_operation_len_ns,
         spec_vs_power_linewidth_threshold_hz, spec_vs_power_max_amplitude_opx,
-        spec_vs_power_min_peak_fraction
         qubit_spec_frequency_span_mhz, qubit_spec_frequency_step_mhz,
         qubit_spec_operation_len_ns, qubit_spec_operation_amplitude_factor,
-        qubit_spec_num_shots, qubit_spec_min_peak_fraction
+        qubit_spec_num_shots
         rabi_min_amp_factor, rabi_max_amp_factor, rabi_amp_factor_step, rabi_num_shots
         max_spec_vs_power_iterations, max_rabi_amp_iterations
     """
@@ -346,7 +338,6 @@ def build_qubit_calibration(
             operation_len_in_ns=p.spec_vs_power_operation_len_ns,
             linewidth_threshold_hz=p.spec_vs_power_linewidth_threshold_hz,
             max_amplitude_opx=p.spec_vs_power_max_amplitude_opx,
-            min_peak_fraction=p.spec_vs_power_min_peak_fraction,
             power_buffer_db=p.spec_vs_power_power_buffer_db,
         )
         qubit_calibration.add_node(spec_vs_power)
@@ -365,7 +356,6 @@ def build_qubit_calibration(
             operation_len_in_ns=p.qubit_spec_operation_len_ns,
             operation_amplitude_factor=p.qubit_spec_operation_amplitude_factor,
             num_shots=p.qubit_spec_num_shots,
-            min_peak_fraction=p.qubit_spec_min_peak_fraction,
         )
         qubit_calibration.add_node(qubit_spec)
 

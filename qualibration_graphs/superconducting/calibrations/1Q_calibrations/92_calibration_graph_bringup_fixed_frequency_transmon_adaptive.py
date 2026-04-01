@@ -100,9 +100,6 @@ class TransmonBringUpParameters(GraphParameters):
     low_power_max_amp: float = 0.1
 
     # ── Resonator – shared ────────────────────────────────────────────────────
-    save_resonator_amplitudes: bool = True
-    min_dip_contrast: float = 0.02
-    lo_leakage_exclusion_mhz: float = 10.0
 
     # ── Qubit spectroscopy vs power ───────────────────────────────────────────
     spec_vs_power_frequency_span_mhz: float = 200.0
@@ -115,7 +112,6 @@ class TransmonBringUpParameters(GraphParameters):
     spec_vs_power_operation_len_ns: int = 200_000
     spec_vs_power_linewidth_threshold_hz: float = 10e6
     spec_vs_power_max_amplitude_opx: float = 0.24
-    spec_vs_power_min_peak_fraction: float = 0.3
     spec_vs_power_power_buffer_db: float = 3.0
 
     # ── Qubit spectroscopy (fine) ──────────────────────────────────────────────
@@ -124,7 +120,6 @@ class TransmonBringUpParameters(GraphParameters):
     qubit_spec_operation_len_ns: int = 200_000
     qubit_spec_operation_amplitude_factor: float = 1.0
     qubit_spec_num_shots: int = 100
-    qubit_spec_min_peak_fraction: float = 0.3
 
     # ── Power Rabi ────────────────────────────────────────────────────────────
     rabi_min_amp_factor: float = 0.001

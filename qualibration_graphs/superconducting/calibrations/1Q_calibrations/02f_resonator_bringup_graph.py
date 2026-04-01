@@ -68,9 +68,6 @@ class ResonatorBringUpParameters(GraphParameters):
     max_punch_out_iterations: int = 5
 
     # Misc
-    save_resonator_amplitudes: bool = True
-    min_dip_contrast: float = 0.02
-    lo_leakage_exclusion_mhz: float = 10.0
 
 
 with QualibrationGraph.build(

@@ -10,6 +10,7 @@ from calibration_utils.iq_blobs_ef import (
     log_fitted_results,
     plot_confusion_matrices,
     plot_iq_blobs,
+    plot_lda_boundaries,
     process_raw_dataset,
 )
 from qm.qua import *
@@ -38,7 +39,10 @@ Prerequisites:
     - Having calibrated the qubit EF_180 pulse parameters.
 
 State update:
-    - The gef centers positions: qubit.resonator.gef_centers
+    - qubit.resonator.gef_centers (3×2 blob centres in raw ADC units, for readout_state_gef())
+    - qubit.gef_rotation_angle, gef_threshold_low, gef_threshold_high, gef_threshold_sorted_order
+    - qubit.gef_lda_sigma, gef_lda_priors, gef_confusion_matrix_lda
+    - qubit.gef_d_ge_V, gef_d_gf_V, gef_d_ef_V, gef_sigma_rms_V
 """
 
 # Be sure to include [Parameters, Quam] so the node has proper type hinting
@@ -146,7 +150,7 @@ def create_qua_program(node: QualibrationNode[Parameters, Quam]):
                 # |f> state readout
                 for i, qubit in multiplexed_qubits.items():
                     qubit.xy.play("x180")
-                    update_frequency(qubit.xy.name, qubit.xy.intermediate_frequency - qubit.anharmonicity)
+                    update_frequency(qubit.xy.name, qubit.xy.intermediate_frequency + qubit.anharmonicity)
                     qubit.xy.play("EF_x180")
                     update_frequency(qubit.xy.name, qubit.xy.intermediate_frequency)
                     qubit.align()
@@ -248,11 +252,13 @@ def plot_data(node: QualibrationNode[Parameters, Quam]):
     """
     fig_iq = plot_iq_blobs(node.results["ds_raw"], node.namespace["qubits"], node.results["ds_fit"])
     fig_confusion = plot_confusion_matrices(node.results["ds_raw"], node.namespace["qubits"], node.results["ds_fit"])
+    fig_lda = plot_lda_boundaries(node.results["ds_raw"], node.namespace["qubits"], node.results["ds_fit"])
     plt.show()
     # Store the generated figures
     node.results["figures"] = {
         "iq_blobs": fig_iq,
         "confusion_matrix": fig_confusion,
+        "lda_boundaries": fig_lda,
     }
 
 
@@ -264,10 +270,30 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
         for q in node.namespace["qubits"]:
             if node.outcomes[q.name] == "failed":
                 continue
+            fr = node.results["fit_results"][q.name]
             operation = q.resonator.operations[node.parameters.operation]
+
+            # Blob centres converted to raw ADC units (used by readout_state_gef())
             node.machine.qubits[q.name].resonator.gef_centers = (
                 node.results["ds_fit"].sel(qubit=q.name).center_matrix.data * operation.length / 2**12
-            ).tolist()  # convert to raw adc units
+            ).tolist()
+
+            # 1D rotated-threshold classifier (in volts)
+            node.machine.qubits[q.name].gef_rotation_angle = fr["rotation_angle_rad"]
+            node.machine.qubits[q.name].gef_threshold_low = fr["threshold_low"]
+            node.machine.qubits[q.name].gef_threshold_high = fr["threshold_high"]
+            node.machine.qubits[q.name].gef_threshold_sorted_order = fr["threshold_sorted_order"]
+
+            # LDA classifier (in volts)
+            node.machine.qubits[q.name].gef_lda_sigma = fr["lda_sigma"]
+            node.machine.qubits[q.name].gef_lda_priors = fr["lda_priors"]
+            node.machine.qubits[q.name].gef_confusion_matrix_lda = fr["confusion_matrix_lda"]
+
+            # Blob separation metrics (in volts)
+            node.machine.qubits[q.name].gef_d_ge_V = fr["d_ge_V"]
+            node.machine.qubits[q.name].gef_d_gf_V = fr["d_gf_V"]
+            node.machine.qubits[q.name].gef_d_ef_V = fr["d_ef_V"]
+            node.machine.qubits[q.name].gef_sigma_rms_V = fr["sigma_rms_V"]
 
 
 # %% {Save_results}

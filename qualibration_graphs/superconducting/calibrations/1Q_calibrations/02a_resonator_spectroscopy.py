@@ -46,7 +46,6 @@ Prerequisites:
 
 State update:
     - The readout frequency: qubit.resonator.f_01 & qubit.resonator.RF_frequency
-    - (Optional) Min/max resonator amplitudes: machine.temp_calibration[qubit].resonator_amplitudes (if save_amplitudes=True)
 """
 
 # Be sure to include [Parameters, Quam] so the node has proper type hinting
@@ -300,17 +299,17 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
             q.resonator.f_01 = freq
             q.resonator.RF_frequency = freq
 
-            # --- Store abs(IQ) amplitudes in Volts at QUAM level (optional) ---
-            if node.parameters.save_amplitudes:
-                # Initialize TemporaryCalibrationData if it doesn't exist for this qubit
-                if q.name not in machine.temp_calibration:
-                    machine.temp_calibration[q.name] = TemporaryCalibrationData()
-
-                if machine.temp_calibration[q.name].resonator_amplitudes is None:
-                    machine.temp_calibration[q.name].resonator_amplitudes = {}
-
-                machine.temp_calibration[q.name].resonator_amplitudes["min_amplitude"] = float(results["min_amplitude"])
-                machine.temp_calibration[q.name].resonator_amplitudes["max_amplitude"] = float(results["max_amplitude"])
+            # Permanently save the readout power/amplitude if requested.
+            # (tracked_resonator.revert_changes() above undid the temporary change;
+            # we re-apply it here outside the tracked context so it persists.)
+            if (
+                node.parameters.save_readout_amplitude
+                and node.parameters.readout_power_dbm is not None
+            ):
+                q.resonator.set_output_power(
+                    power_in_dbm=node.parameters.readout_power_dbm,
+                    max_amplitude=node.parameters.max_amp,
+                )
 
 # %% {Save_results}
 @node.run_action()

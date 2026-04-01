@@ -216,7 +216,11 @@ def analyse_data(node: QualibrationNode[Parameters, Quam]):
 @node.run_action(skip_if=node.parameters.simulate)
 def plot_data(node: QualibrationNode[Parameters, Quam]):
     """Plot the raw and fitted data in specific figures whose shape is given by qubit.grid_location."""
-    fig_raw_fit = plot_raw_data_with_fit(node.results["ds_raw"], node.namespace["qubits"], node.results["ds_fit"])
+    fig_raw_fit = plot_raw_data_with_fit(
+        node.results["ds_raw"], node.namespace["qubits"], node.results["ds_fit"],
+        find_dip=node.parameters.find_dip,
+        signal_source=node.parameters.signal_source,
+    )
     plt.show()
     # Store the generated figures
     node.results["figures"] = {
@@ -238,8 +242,10 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
             q.xy.RF_frequency = node.results["fit_results"][q.name]["frequency"]
 
             fit_result = node.results["fit_results"][q.name]
-            # Update the integration weight angle
-            q.resonator.operations["readout"].integration_weights_angle = fit_result["iw_angle"]
+            # Update the integration weight angle only when I_rot was used
+            # (IQ_abs carries no phase information so the angle is unchanged)
+            if node.parameters.signal_source != "IQ_abs":
+                q.resonator.operations["readout"].integration_weights_angle = fit_result["iw_angle"]
             if node.parameters.update_pulses_amplitude:
                 # Update the saturation amplitude
                 q.xy.operations["saturation"].amplitude = fit_result["saturation_amp"]

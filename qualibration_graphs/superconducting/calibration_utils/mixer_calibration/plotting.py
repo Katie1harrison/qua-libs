@@ -23,9 +23,10 @@ def plot_raw_data_with_fit(node: QualibrationNode):
     - Each subplot contains the raw data and the fitted curve.
     """
     figures = {}
-    for qubit in node.namespace["qubits"]:
-        figs = plot_individual_data_with_fit(node.namespace["calibration_results"], qubit.name)
-        figures["qubit.name"] = figs
+    cal_results = node.namespace["calibration_results"]
+    for name in cal_results:
+        figs = plot_individual_data_with_fit(cal_results, name)
+        figures[name] = figs
     return figures
 
 
@@ -34,8 +35,8 @@ def plot_individual_data_with_fit(calibration_results: Dict[str, Dict[str, Mixer
     Plots individual qubit data on a given axis with optional fit.
     """
     figs = {}
-    for key in ["resonator", "xy_drive"]:
-        if calibration_results[qubit_name][key] is not None:
+    for key in ["resonator", "xy_drive", "cavity_mode_drive", "sideband_drive"]:
+        if calibration_results[qubit_name].get(key) is not None:
             plotter = CalibrationResultPlotter(calibration_results[qubit_name][key])
             # LO leakage
             fig_lo_leakage = plotter.show_lo_leakage_calibration_result()

@@ -115,31 +115,31 @@ def create_qua_program(node: QualibrationNode[EfParameters, Quam]):
             # Initialize the QPU in terms of flux points (flux tunable transmons and/or tunable couplers)
             for qubit in multiplexed_qubits.values():
                 node.machine.initialize_qpu(target=qubit)
-                qubit.resonator.update_frequency(
-                    qubit.resonator.intermediate_frequency
-                    + (qubit.resonator.GEF_frequency_shift if node.parameters.use_state_discrimination else qubit.chi)
-                )
+                # qubit.resonator.update_frequency(
+                #     qubit.resonator.intermediate_frequency
+                #     + (qubit.resonator.GEF_frequency_shift if node.parameters.use_state_discrimination else qubit.chi)
+                # )
             align()
 
             with for_(n, 0, n < n_avg, n + 1):
                 save(n, n_st)
                 with for_(*from_array(a, amps)):
                     # Qubit initialization
-                    for i, qubit in multiplexed_qubits.items():  # Reset the qubit to ground state
-                        qubit.reset(reset_type=node.parameters.reset_type, simulate=node.parameters.simulate)
-                        # Wait twice the regular thermal time for proper |f> state reset
-                        if node.parameters.reset_type == "thermal":
-                            qubit.wait(qubit.thermalization_time * u.ns)
+                    for i, qubit in multiplexed_qubits.items():
+                        qubit.xy.wait(2 * qubit.thermalization_time * u.ns)
                     align()
                     for i, qubit in multiplexed_qubits.items():
                         # Set the XY channel to the |g> -> |e> transition (GE) intermediate frequency
                         qubit.xy.update_frequency(qubit.xy.intermediate_frequency)
                         # Apply previously calibrated pi pulse to populate |e>
                         qubit.xy.play("x180")
-                        # Shift drive to the |e> -> |f> (EF) transition by subtracting the anharmonicity
-                        qubit.xy.update_frequency(qubit.xy.intermediate_frequency - qubit.anharmonicity)
+                        # Shift drive to the |e> -> |f> (EF) transition (anharmonicity is stored with its physical sign)
+                        qubit.xy.update_frequency(qubit.xy.intermediate_frequency + qubit.anharmonicity)
                         # Apply EF pi pulse with swept amplitude scaling factor 'a'
                         qubit.xy.play("EF_x180", amplitude_scale=a)
+                        # Reset to ge frequency and apply ge pi pulse for improved readout fidelity
+                        qubit.xy.update_frequency(qubit.xy.intermediate_frequency)
+                        qubit.xy.play("x180")
                     align()
 
                     # Qubit readout

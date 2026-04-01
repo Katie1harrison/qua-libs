@@ -6,7 +6,7 @@ import xarray as xr
 
 from qualibrate import QualibrationNode
 from qualibration_libs.data import add_amplitude_and_phase, convert_IQ_to_V
-from qualibration_libs.analysis import peaks_dips
+from qualibration_libs.analysis import peaks_dips, lorentzian_peak
 from quam_config.instrument_limits import instrument_limits
 
 
@@ -20,21 +20,12 @@ class FitParameters:
     iw_angle: float
     saturation_amp: float
     x180_amp: float
+    chi2: float
     success: bool
 
 
 def log_fitted_results(fit_results: Dict, log_callable=None):
-    """
-    Logs the node-specific fitted results for all qubits from the fit results
-
-    Parameters:
-    -----------
-    fit_results : dict
-        Dictionary containing the fitted results for all qubits.
-    logger : logging.Logger, optional
-        Logger for logging the fitted results. If None, a default logger is used.
-
-    """
+    """Log the fitted results for all qubits."""
     if log_callable is None:
         log_callable = logging.getLogger(__name__).info
     for q in fit_results.keys():
@@ -44,37 +35,12 @@ def log_fitted_results(fit_results: Dict, log_callable=None):
         s_angle = f"The integration weight angle: {fit_results[q]['iw_angle']:.3f} rad\n "
         s_saturation = f"To get the desired FWHM, the saturation amplitude is updated to: {1e3 * fit_results[q]['saturation_amp']:.1f} mV | "
         s_x180 = f"To get the desired x180 gate, the x180 amplitude is updated to: {1e3 * fit_results[q]['x180_amp']:.1f} mV\n "
+        s_chi2 = f"Residual chi2: {fit_results[q].get('chi2', float('nan')):.3f}\n "
         if fit_results[q]["success"]:
             s_qubit += " SUCCESS!\n"
         else:
             s_qubit += " FAIL!\n"
-        log_callable(s_qubit + s_freq + s_fwhm + s_freq + s_angle + s_saturation + s_x180)
-
-
-def _get_resonator_amplitude(machine, qubit_name: str, key: str, data: xr.Dataset) -> float:
-    """
-    Get resonator amplitude from temp_calibration with fallback to data statistics.
-
-    Tries machine.temp_calibration[qubit_name].resonator_amplitudes[key] first.
-    Falls back to I_rot min/max (or IQ_abs if I_rot is not yet computed) from the
-    current dataset if not available.
-    """
-    try:
-        return machine.temp_calibration[qubit_name].resonator_amplitudes[key]
-    except (KeyError, TypeError, AttributeError):
-        # Peak heights are measured in I_rot space; use I_rot statistics as fallback
-        # so the reference scale is consistent.  Fall back to IQ_abs when I_rot is
-        # not yet available (e.g. called before fit_raw_data has run).
-        if "I_rot" in data.data_vars:
-            qubit_data = data.sel(qubit=qubit_name).I_rot
-        else:
-            qubit_data = data.sel(qubit=qubit_name).IQ_abs
-        if key == "min_amplitude":
-            return float(qubit_data.min())
-        elif key == "max_amplitude":
-            return float(qubit_data.max())
-        else:
-            raise ValueError(f"Unknown amplitude key: {key}")
+        log_callable(s_qubit + s_freq + s_fwhm + s_angle + s_saturation + s_x180 + s_chi2)
 
 
 def process_raw_dataset(ds: xr.Dataset, node: QualibrationNode):
@@ -86,118 +52,124 @@ def process_raw_dataset(ds: xr.Dataset, node: QualibrationNode):
     return ds
 
 
+def _compute_chi2_lorentzian(fit: xr.Dataset, signal: xr.DataArray) -> xr.DataArray:
+    """
+    Compute the residual chi-squared for each qubit's Lorentzian fit:
+
+        chi2 = SS_res / ((N - 4) * amplitude^2)
+
+    chi2 <= 2 -> good fit (peak detected); chi2 > 2 -> residuals dominate (no peak).
+    """
+    chi2_values = []
+    for q in fit.qubit.values:
+        fit_q = fit.sel(qubit=q)
+        data_q = signal.sel(qubit=q).values
+        N = len(data_q)
+        P = 4
+        amplitude = float(fit_q.amplitude.values)
+        position = float(fit_q.position.values)
+        width = float(fit_q.width.values)
+        baseline = float(fit_q.base_line.mean().values)
+        if not np.isfinite(amplitude) or amplitude <= 0 or N <= P:
+            chi2_values.append(float("inf"))
+            continue
+        fitted = lorentzian_peak(fit.detuning.values, amplitude, position, width / 2, baseline)
+        SS_res = float(np.nansum((data_q - fitted) ** 2))
+        chi2_values.append(SS_res / ((N - P) * amplitude ** 2))
+    return xr.DataArray(chi2_values, dims=["qubit"], coords={"qubit": fit.qubit})
+
+
 def fit_raw_data(ds: xr.Dataset, node: QualibrationNode) -> Tuple[xr.Dataset, dict[str, FitParameters]]:
     """
     Fit the qubit frequency and FWHM for each qubit in the dataset.
 
-    Parameters:
-    -----------
-    ds : xr.Dataset
-        Dataset containing the raw data.
-    node_parameters : Parameters
-        Parameters related to the node, including whether state discrimination is used.
-
-    Returns:
-    --------
-    xr.Dataset
-        Dataset containing the fit results.
+    When ``node.parameters.signal_source == 'IQ_abs'`` the magnitude is used for
+    fitting directly (no IQ rotation is needed and the integration weight angle is
+    left unchanged).  When ``signal_source == 'I_rot'`` (default) the IQ data is
+    rotated via PCA to maximize qubit-induced variance in a single quadrature.
     """
+    signal_source = getattr(node.parameters, "signal_source", "I_rot")
+    is_dip = getattr(node.parameters, "find_dip", False)
+
     ds_fit = ds
-    # search for frequency for which the amplitude the farthest from the mean to indicate the approximate location of the peak
+
+    # Always compute I_rot so it is available for inspection even when IQ_abs is used.
     shifts = np.abs((ds_fit.IQ_abs - ds_fit.IQ_abs.mean(dim="detuning"))).idxmax(dim="detuning")
-    # Find the rotation angle to align the separation along the 'I' axis
     angle = np.arctan2(
         ds_fit.sel(detuning=shifts).Q - ds_fit.Q.mean(dim="detuning"),
         ds_fit.sel(detuning=shifts).I - ds_fit.I.mean(dim="detuning"),
     )
     ds_fit = ds_fit.assign({"iw_angle": angle})
-    # rotate the data to the new I axis
     ds_fit = ds_fit.assign({"I_rot": ds_fit.I * np.cos(ds_fit.iw_angle) + ds_fit.Q * np.sin(ds_fit.iw_angle)})
-    # Find the peak with minimal prominence as defined, if no such peak found, returns nan
-    fit_vals = peaks_dips(ds_fit.I_rot, dim="detuning", prominence_factor=5)
+
+    # Select the signal passed to peaks_dips
+    if signal_source == "IQ_abs":
+        signal_for_fit = ds_fit.IQ_abs
+    elif is_dip:
+        signal_for_fit = -ds_fit.I_rot
+    else:
+        signal_for_fit = ds_fit.I_rot
+
+    fit_vals = peaks_dips(signal_for_fit, dim="detuning", prominence_factor=5)
     ds_fit = xr.merge([ds_fit, fit_vals])
-    # Extract the relevant fitted parameters
     fit_data, fit_results = _extract_relevant_fit_parameters(ds_fit, node)
     return fit_data, fit_results
 
 
 def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
-    """Add metadata to the dataset and fit results."""
+    """Add metadata to the dataset and extract fit results."""
     limits = [instrument_limits(q.xy) for q in node.namespace["qubits"]]
-    # Add metadata to fit results
     fit.attrs = {"long_name": "frequency", "units": "Hz"}
-    # Get the fitted resonator frequency
+
     full_freq = np.array([q.xy.RF_frequency for q in node.namespace["qubits"]])
     res_freq = fit.position + full_freq
     rel_freq = fit.position
     fit = fit.assign({"res_freq": ("qubit", res_freq.data)})
     fit = fit.assign({"relative_freq": ("qubit", rel_freq.data)})
     fit.res_freq.attrs = {"long_name": "qubit xy frequency", "units": "Hz"}
-    # Get the fitted FWHM
+
     fwhm = np.abs(fit.width)
     fit = fit.assign({"fwhm": fwhm})
     fit.fwhm.attrs = {"long_name": "qubit fwhm", "units": "Hz"}
-    # Get optimum iw angle
+
+    signal_source = getattr(node.parameters, "signal_source", "I_rot")
     prev_angles = np.array(
         [q.resonator.operations["readout"].integration_weights_angle for q in node.namespace["qubits"]]
     )
-    fit = fit.assign({"iw_angle": (prev_angles + fit.iw_angle) % (2 * np.pi)})
+    if signal_source == "IQ_abs":
+        # IQ_abs gives no phase information — keep the existing angle unchanged.
+        fit = fit.assign({"iw_angle": ("qubit", prev_angles)})
+    else:
+        fit = fit.assign({"iw_angle": (prev_angles + fit.iw_angle) % (2 * np.pi)})
     fit.iw_angle.attrs = {"long_name": "integration weight angle", "units": "rad"}
-    # Get saturation amplitude
+
     x180_length = np.array([q.xy.operations["x180"].length * 1e-9 for q in node.namespace["qubits"]])
     used_amp = np.array(
-        [
-            q.xy.operations["saturation"].amplitude * node.parameters.operation_amplitude_factor
-            for q in node.namespace["qubits"]
-        ]
+        [q.xy.operations["saturation"].amplitude * node.parameters.operation_amplitude_factor
+         for q in node.namespace["qubits"]]
     )
     factor_cw = node.parameters.target_peak_width / fit.width
     fit = fit.assign({"saturation_amplitude": factor_cw * used_amp / node.parameters.operation_amplitude_factor})
-    # get expected x180 amplitude
     factor_x180 = np.pi / (fit.width * x180_length)
     fit = fit.assign({"x180_amplitude": factor_x180 * used_amp})
 
-    # Assess whether the fit was successful or not
     freq_success = np.abs(res_freq) < node.parameters.frequency_span_in_mhz * 1e6 + full_freq
     fwhm_success = np.abs(fwhm) < node.parameters.frequency_span_in_mhz * 1e6 + full_freq
-    # saturation_amp_success = np.abs(fit.saturation_amplitude) < limits[0].max_wf_amplitude
-    saturation_amp_success = True
 
-    # Peak amplitude fraction check:
-    #   reference range = temp_calibration resonator (max - min) amplitude (IQ_abs-based),
-    #                     which is the calibrated IQ dynamic range of the readout.
-    #                     Falls back to I_rot range from current data when not available.
-    #   min_peak_height = min_peak_fraction * reference_range
-    #   peak height     = I_rot_at_peak - I_rot_global_min   (measured in I_rot space)
-    #   accepted if     peak_height >= min_peak_height
-    #
-    # Using the resonator IQ_abs range as the reference rather than the I_rot range
-    # keeps the threshold stable across runs while the actual I_rot values vary with
-    # the rotation angle.
-    machine = node.machine
-    peak_heights = []
-    peak_height_ok = []
-    for q_name in fit.qubit.values:
-        resonator_min = _get_resonator_amplitude(machine, q_name, "min_amplitude", fit)
-        resonator_max = _get_resonator_amplitude(machine, q_name, "max_amplitude", fit)
-        min_peak_height = node.parameters.min_peak_fraction * (resonator_max - resonator_min)
-        pos = float(fit.position.sel(qubit=q_name).values)
-        # Measure peak height in I_rot space relative to the I_rot baseline (minimum).
-        I_rot_data = fit.I_rot.sel(qubit=q_name)
-        I_rot_baseline = float(I_rot_data.min().values)
-        if np.isfinite(pos):
-            peak_val = float(I_rot_data.sel(detuning=pos, method="nearest").values)
-            peak_height = peak_val - I_rot_baseline
-        else:
-            peak_height = 0.0
-        peak_heights.append(peak_height)
-        peak_height_ok.append(peak_height >= min_peak_height)
-    fit = fit.assign({"peak_height": xr.DataArray(peak_heights, dims=["qubit"], coords={"qubit": fit.qubit})})
-    min_peak_fraction_success = xr.DataArray(peak_height_ok, dims=["qubit"], coords={"qubit": fit.qubit})
+    # Chi-square check (hard failure) — use the same signal that was fitted
+    is_dip = getattr(node.parameters, "find_dip", False)
+    if signal_source == "IQ_abs":
+        signal_for_chi2 = fit.IQ_abs
+    elif is_dip:
+        signal_for_chi2 = -fit.I_rot
+    else:
+        signal_for_chi2 = fit.I_rot
+    chi2 = _compute_chi2_lorentzian(fit, signal_for_chi2)
+    chi2_success = chi2 <= 2.0
 
-    # x180amp_success = np.abs(fit.x180_amplitude.data) < limits[0].max_x180_wf_amplitude
-    success_criteria = freq_success & fwhm_success & saturation_amp_success & min_peak_fraction_success
+    success_criteria = freq_success & fwhm_success & chi2_success
     fit = fit.assign({"success": success_criteria})
+    fit = fit.assign({"chi2": chi2})
 
     fit_results = {
         q: FitParameters(
@@ -207,6 +179,7 @@ def _extract_relevant_fit_parameters(fit: xr.Dataset, node: QualibrationNode):
             iw_angle=fit.sel(qubit=q).iw_angle.values.__float__(),
             saturation_amp=fit.sel(qubit=q).saturation_amplitude.values.__float__(),
             x180_amp=fit.sel(qubit=q).x180_amplitude.values.__float__(),
+            chi2=float(chi2.sel(qubit=q).values),
             success=fit.sel(qubit=q).success.values.__bool__(),
         )
         for q in fit.qubit.values
