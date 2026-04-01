@@ -46,7 +46,7 @@ Prerequisites:
     - Calibrated ge and ef transitions (nodes 04b, 13).
 
 State update:
-    - cavity_mode.cavity_mode_drive.RF_frequency  →  sideband resonance frequency.
+    - cavity_transmon_pairs["{qubit}_{mode}"].sideband_drive.RF_frequency  →  sideband resonance frequency.
 """
 
 node = QualibrationNode[Parameters, Quam](

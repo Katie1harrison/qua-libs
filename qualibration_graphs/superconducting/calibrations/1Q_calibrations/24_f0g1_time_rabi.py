@@ -46,7 +46,7 @@ Prerequisites:
     - Rough f0g1 pi-pulse amplitude calibrated (node 22).
 
 State update:
-    - cavity_mode.cavity_mode_drive.operations[operation].length  ->  pi-pulse duration [ns].
+    - cavity_transmon_pairs["{qubit}_{mode}"].sideband_drive.operations[operation].length  ->  pi-pulse duration [ns].
 """
 
 node = QualibrationNode[Parameters, Quam](

@@ -1,13 +1,11 @@
 from typing import Dict, Any, List, Optional
 from quam.core import quam_dataclass, QuamBase
-from quam_builder.architecture.superconducting.qpu import FixedFrequencyQuam, FluxTunableQuam
+from quam_builder.architecture.superconducting.qpu import FixedFrequencyQuam
 
 
 @quam_dataclass
 class TemporaryCalibrationData(QuamBase):
     """Temporary calibration data for a single qubit."""
-    # abs(IQ) amplitudes in Volts for this qubit
-    resonator_amplitudes: Dict[str, float] = None
     # Store arbitrary calibration parameters and metadata
     parameters: Dict[str, Any] = None
     # Adaptive frequency span for spectroscopy (in MHz)
@@ -55,4 +53,3 @@ class Quam(FixedFrequencyQuam):
     # Temporary calibration data per qubit
     # Note: Use Dict for QUAM JSON serialization compatibility
     temp_calibration: Dict[str, TemporaryCalibrationData] = None
-    resonator_amplitudes: Dict[str, Dict[str, float]] = None

@@ -327,7 +327,7 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
             pairs = getattr(node.machine, "cavity_transmon_pairs", None)
             if pairs is not None:
                 if pair_key not in pairs:
-                    from srf_quam_config.cavity_transmon_pair import CavityTransmonPair
+                    from quam_builder.architecture.superconducting.qubit_pair import CavityTransmonPair
                     pairs[pair_key] = CavityTransmonPair(
                         qubit_name=qubit.name, cavity_mode_name=mode_name
                     )

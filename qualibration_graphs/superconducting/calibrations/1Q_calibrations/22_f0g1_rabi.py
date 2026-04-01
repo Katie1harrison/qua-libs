@@ -45,7 +45,7 @@ Prerequisites:
     - Calibrated f0g1 sideband frequency (node 21).
 
 State update:
-    - cavity_mode.cavity_mode_drive.operations[operation].amplitude  →  π-pulse amplitude.
+    - cavity_transmon_pairs["{qubit}_{mode}"].sideband_drive.operations[operation].amplitude  →  π-pulse amplitude.
 """
 
 node = QualibrationNode[Parameters, Quam](

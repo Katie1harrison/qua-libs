@@ -310,17 +310,11 @@ def update_state(node: QualibrationNode[Parameters, Quam]):
             pairs = getattr(node.machine, "cavity_transmon_pairs", None)
             if pairs is not None:
                 if pair_key not in pairs:
-                    try:
-                        from srf_quam_config.cavity_transmon_pair import CavityTransmonPair
-                        pairs[pair_key] = CavityTransmonPair(
-                            qubit_name=qubit.name, cavity_mode_name=mode_name
-                        )
-                        logger.info(f"Created CavityTransmonPair '{pair_key}' on the fly.")
-                    except ImportError:
-                        logger.warning(
-                            f"srf_quam_config.cavity_transmon_pair not found — "
-                            f"cannot create CavityTransmonPair '{pair_key}'."
-                        )
+                    from quam_builder.architecture.superconducting.qubit_pair import CavityTransmonPair
+                    pairs[pair_key] = CavityTransmonPair(
+                        qubit_name=qubit.name, cavity_mode_name=mode_name
+                    )
+                    logger.info(f"Created CavityTransmonPair '{pair_key}' on the fly.")
                 if pair_key in pairs:
                     pairs[pair_key].displacement_k = float(k)
                     # Also persist the fitted chi so future nodes can use it
